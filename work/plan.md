@@ -36,9 +36,11 @@ cluster, and compares:
     │  → UnsafeGuessKindToResource() → GVRs
     │
     └─ Kubernetes overrides (OpenShift feature gates that enable extra k8s APIs)
-       for each enabledGate: look up override GVs from map in openshift/api
-       e.g. MutatingAdmissionPolicy → admissionregistration.k8s.io/v1beta1
-       → derive resources from scheme the same way as stable APIs
+       for each enabledGate: look up override entries from map in openshift/api
+       entries have explicit Kinds (not derived from scheme — see limitation below)
+       e.g. MutatingAdmissionPolicy → MutatingAdmissionPolicy, MutatingAdmissionPolicyBinding
+            at admissionregistration.k8s.io/v1beta1
+       → UnsafeGuessKindToResource() on each Kind → GVRs
 
  3. Query cluster
     discovery.ServerGroupsAndResources()
@@ -93,14 +95,43 @@ Kubernetes API inventory is derived programmatically at test time in origin usin
 This means **no manual maintenance for Kubernetes APIs during rebases**. The expected
 list is always correct because it's derived from the same vendored code the cluster uses.
 
+### Limitation: scheme is unreliable for Kubernetes-disabled beta GVs
+
+The scheme registers types at their historical GroupVersions for serialization/conversion
+backward compatibility, not just for serving. For example,
+`admissionregistration.k8s.io/v1beta1` in the scheme includes 6 types, but only 2
+(`MutatingAdmissionPolicy`, `MutatingAdmissionPolicyBinding`) are actually served —
+the other 4 graduated to v1 long ago but remain registered so old objects can still
+be decoded.
+
+This only affects beta GVs where a **v1 already exists** in the same group — promoted
+types linger at the old GV. Kubernetes puts these superseded beta GVs in its disabled
+list (`betaAPIGroupVersionsDisabledByDefault`).
+
+For GVs that `DefaultAPIResourceConfigSource()` **enables** — whether v1 or beta —
+the scheme is reliable:
+- **Stable GVs**: types at v1 are the final destination, they don't graduate away
+- **Beta GVs of new groups** (e.g., a new API starting at `v1beta1` with its feature
+  gate beta-enabled-by-default): no v1 exists yet, so no graduated types — scheme
+  matches what's served
+
+**Consequence**: Derive resources from the scheme for ALL GVs that
+`DefaultAPIResourceConfigSource()` enables. Only the **override map** (for GVs that
+OpenShift enables beyond Kubernetes defaults, like `admissionregistration.k8s.io/v1beta1`)
+needs explicit Kinds, because those GVs are Kubernetes-disabled and have graduated types.
+
 ### Kubernetes API overrides from OpenShift feature gates
 
 OpenShift enables certain alpha/beta Kubernetes APIs when specific OpenShift feature gates
-are active (e.g., `MutatingAdmissionPolicy` gate enables `admissionregistration.k8s.io/v1beta1`).
-These APIs are NOT in `DefaultAPIResourceConfigSource()` — they're added to the kube-apiserver's
-`--runtime-config` by the cluster-kube-apiserver-operator.
+are active (e.g., `MutatingAdmissionPolicy` gate enables `MutatingAdmissionPolicy` and
+`MutatingAdmissionPolicyBinding` at `admissionregistration.k8s.io/v1beta1`).
 
-The mapping of OpenShift feature gate → additional Kubernetes GroupVersions lives in
+These APIs are NOT in `DefaultAPIResourceConfigSource()` — they're added to the kube-apiserver's
+`--runtime-config` by the cluster-kube-apiserver-operator. And because the scheme is
+unreliable for alpha/beta GVs (see above), the override map must list **explicit Kinds**,
+not just GroupVersions.
+
+The mapping of OpenShift feature gate → additional Kubernetes API resources lives in
 openshift/api, co-located with the feature gate definitions. This could be an extension
 of the feature gate builder pattern in `features/features.go` or a separate registry
 in `features/` or `servedapis/`.
@@ -290,14 +321,15 @@ import (
 )
 
 func expectedKubeResources() sets.Set[schema.GroupVersionResource] {
-    // 1. Get enabled GroupVersions from DefaultAPIResourceConfigSource()
+    // Get enabled GroupVersions — includes both stable (v1) and beta GVs
+    // of new groups whose feature gate is beta-enabled-by-default.
+    // Superseded beta GVs (where v1 exists) are in the disabled list,
+    // so they won't appear here — no graduated-type problem.
     resourceConfig := controlplane.DefaultAPIResourceConfigSource()
 
-    // 2. For each enabled GV, get types from the scheme
     result := sets.New[schema.GroupVersionResource]()
     for gv := range resourceConfig.EnabledVersions() {
-        types := clientgoscheme.Scheme.KnownTypes(gv)
-        for kind := range types {
+        for kind := range clientgoscheme.Scheme.KnownTypes(gv) {
             if shouldSkipType(kind) {
                 continue
             }
@@ -310,11 +342,8 @@ func expectedKubeResources() sets.Set[schema.GroupVersionResource] {
 
 // shouldSkipType filters out types that aren't top-level API resources
 func shouldSkipType(kind string) bool {
-    // List types
     if strings.HasSuffix(kind, "List") { return true }
-    // Options/proxy types
     if strings.HasSuffix(kind, "Options") { return true }
-    // Subresource-only types (small, stable blocklist)
     return subresourceOnlyTypes.Has(kind)
 }
 
@@ -323,15 +352,17 @@ var subresourceOnlyTypes = sets.New("Binding", "Eviction", "Scale",
     "PodProxyOptions", "SerializedReference", "RangeAllocation")
 ```
 
-**Why this works without manual maintenance:**
-- `clientgoscheme.Scheme` is auto-generated and updated when `k8s.io/client-go` is vendored
-- `DefaultAPIResourceConfigSource()` is vendored from `k8s.io/kubernetes`
+**Why this works for both stable and beta GVs:**
+- `DefaultAPIResourceConfigSource()` enables stable GVs and beta GVs of new API groups
+  (where the Kubernetes feature gate is beta-enabled-by-default)
+- Superseded beta GVs (where types graduated to v1) are in the disabled list — they're
+  never in the enabled set, so the graduated-type problem doesn't arise
+- The scheme is reliable for all enabled GVs because enabled betas are always for new
+  groups without a v1 to graduate types away from
 - `UnsafeGuessKindToResource()` handles standard Kubernetes pluralization correctly
 - The `subresourceOnlyTypes` blocklist is ~10 entries and extremely stable across releases
-- When a new Kubernetes resource is added (e.g., new Kind in `apps/v1`), the scheme
-  automatically includes it — no manual update needed
 
-**Reference**: Your PR openshift/cluster-kube-apiserver-operator#2179 uses the same
+**Reference**: PR openshift/cluster-kube-apiserver-operator#2179 uses the same
 `clientgoscheme.Scheme` approach for staleness detection.
 
 ### B3. Helpers to Reuse
@@ -425,22 +456,30 @@ field on `groupVersionKindsByOpenshiftVersion`. The same pattern applies here:
 // features/kube_api_overrides.go
 type KubeAPIOverride struct {
     GroupVersion     schema.GroupVersion
+    Kinds            []string      // explicit — scheme is unreliable for alpha/beta GVs
     KubeVersionRange semver.Range  // nil means all versions
 }
 
 var KubeAPIOverridesByFeatureGate = map[FeatureGateName][]KubeAPIOverride{
     "MutatingAdmissionPolicy": {
         {KubeVersionRange: semver.MustParseRange(">=1.33.0 <1.34.0"),
-         GroupVersion: schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1alpha1"}},
+         GroupVersion: schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1alpha1"},
+         Kinds: []string{"MutatingAdmissionPolicy", "MutatingAdmissionPolicyBinding"}},
         {KubeVersionRange: semver.MustParseRange(">=1.34.0 <1.37.0"),
-         GroupVersion: schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"}},
+         GroupVersion: schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
+         Kinds: []string{"MutatingAdmissionPolicy", "MutatingAdmissionPolicyBinding"}},
     },
 }
 ```
 
-At test time, the kube version is available from `componentbaseversion.DefaultKubeBinaryVersion`
-(vendored), and the test filters the override map to only entries matching the current
-kube version.
+**Why explicit Kinds**: The scheme registers types at old GVs for serialization
+backward compatibility even after graduation. `admissionregistration.k8s.io/v1beta1`
+has 6 types in the scheme, but only 2 are actually served — the other 4 graduated
+to v1. We can't derive resources from the scheme for alpha/beta GVs.
+
+At test time, Kinds are converted to GVRs via `UnsafeGuessKindToResource()`. The kube
+version is available from `componentbaseversion.DefaultKubeBinaryVersion` (vendored),
+and the test filters the override map to only entries matching the current kube version.
 
 ---
 
