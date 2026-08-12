@@ -99,8 +99,8 @@ cluster, and compares:
     │  → Aggregated API server resources (openshift-apiserver, oauth-apiserver)
     │  → Optional operator APIs (monitoring, OLM, machine-api, etc.)
     │
-    ├─ Kubernetes APIs (from pre-generated per-version static list in openshift/api)
-    │  Load kube-apis-{kubeVersion}.yaml from vendored openshift/api
+    ├─ Kubernetes APIs (from pre-generated per-version data in openshift/api)
+    │  Call servedapis.KubernetesAPIs(kubeVersion) from vendored openshift/api
     │  → generated during rebase via scheme + DefaultAPIResourceConfigSource
     │  → versioned to handle skew between test binary and cluster
     │
@@ -659,20 +659,20 @@ new CRDs during the time between the openshift/api merge and the origin vendor b
 During a Kubernetes rebase in openshift/api:
 
 1. **Update vendored k8s.io dependencies** in openshift/api (update `k8s.io/api`, `k8s.io/client-go`, `k8s.io/kubernetes`)
-2. **Regenerate Kubernetes API static files**: Run the generator (via `make update`) to produce updated `kube-apis-{version}.yaml` files
-3. **Review the diff** in `payload-manifests/served-apis/kube-apis-*.yaml` — shows exactly which APIs changed
+2. **Regenerate Kubernetes API data**: Run the generator (via `make update`) to update `zz_generated.served_apis.go` with new version data
+3. **Review the diff** in `servedapis/zz_generated.served_apis.go` — check the new `kubeAPIs{version}` variable to see which APIs changed
 4. **Update override map** if needed (see below)
-5. **Vendor bump in origin**: When origin vendors the updated openshift/api, the test automatically picks up the new Kubernetes API list
+5. **Vendor bump in origin**: When origin vendors the updated openshift/api, the test automatically picks up the new Kubernetes API data
 
 **What changes automatically**:
 - New resources added to existing stable GroupVersions → scheme-based generation picks them up
-- Resources removed from Kubernetes → absent from generated file
+- Resources removed from Kubernetes → absent from generated data
 - GroupVersions moving from disabled to enabled (or vice versa) → reflected in `DefaultAPIResourceConfigSource()`
-- The generated `kube-apis-{version}.yaml` files capture the complete state for that kube version
+- The generated `kubeAPIs{version}` variables capture the complete state for that kube version
 
 **What needs manual attention**:
 - **Kubernetes API override map**: If the rebase changes which alpha/beta APIs exist for a feature-gate-enabled GroupVersion (e.g., `v1alpha1` → `v1beta1` for MutatingAdmissionPolicy), update `features/kube_api_overrides.go`
-- **New kube version**: Add a new `kube-apis-{newVersion}.yaml` file to the generation logic
+- **New kube version**: Add new case to `KubernetesAPIs()` function and generate new `kubeAPIs{newVersion}` variable
 - **OpenShift CRD changes**: If the rebase changes OpenShift CRDs, `make update` regenerates both kube and OpenShift inventories
 
 ### Per-version override map
@@ -733,11 +733,11 @@ or kube-apiserver version endpoint), and filters the override map to only entrie
 
 ## Verification
 
-1. **openshift/api CI**: `make verify` includes `verify-served-api-inventory` — ensures generated files are in sync
-2. **openshift/api rebase**: After k8s vendor bump → `make update` → review diff in `kube-apis-*.yaml` files
+1. **openshift/api CI**: `make verify` includes `verify-served-api-inventory` — ensures generated file is in sync
+2. **openshift/api rebase**: After k8s vendor bump → `make update` → review diff in `zz_generated.served_apis.go`
 3. **origin e2e**: Test runs as `[Suite:openshift/conformance/parallel]` on SelfManaged and HyperShift clusters
 4. **During development**: After modifying CRDs or feature gates → `make update` in openshift/api → review diff
-5. **Version skew handled**: Test queries cluster version and loads matching static file, eliminating test-binary vs cluster-version mismatch
+5. **Version skew handled**: Test queries cluster version and calls `KubernetesAPIs(version)`, eliminating test-binary vs cluster-version mismatch
 
 ---
 
@@ -756,17 +756,15 @@ or kube-apiserver version endpoint), and filters the override map to only entrie
 5. Create `hack/update-served-api-inventory.sh` and `hack/verify-served-api-inventory.sh`
 6. Wire into Makefile: `update-served-api-inventory`, `verify-served-api-inventory`, `build`
 7. Run generator → produces:
-   - `payload-manifests/served-apis/servedAPIs-*.yaml` (OpenShift APIs per profile/featureSet)
-   - `payload-manifests/served-apis/kube-apis-*.yaml` (Kubernetes APIs per version)
-   - `servedapis/zz_generated.served_apis.go`
+   - `servedapis/zz_generated.served_apis.go` (all inventory data as Go code)
 
 ### In origin:
 
 8. Vendor updated openshift/api
 9. Create `test/extended/apiserver/served_api_inventory.go`:
-   - Embed `kube-apis-*.yaml` files (or load from vendored openshift/api)
+   - Call `servedapis.ForProfile()` and `servedapis.KubernetesAPIs()` from vendored openshift/api
    - Detect cluster profile, feature set, kube version
-   - Load expected sets from three sources
+   - Build expected sets from three sources
    - Query discovery
    - Bidirectional compare
 10. Test against real cluster
