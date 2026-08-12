@@ -87,15 +87,15 @@ cluster, and compares:
 ```
  1. Detect cluster state
     ├── profile      ← Infrastructure.Status.ControlPlaneTopology (Hypershift vs SelfManaged)
-    ├── featureSet   ← FeatureGate("cluster").Spec.FeatureSet (Default, TechPreview, ...)
+    ├── featureSet   ← FeatureGate("cluster").Spec.FeatureSet → skip test if not "Default"
     ├── enabledGates ← FeatureGate("cluster").Status.FeatureGates (list of active gates)
     └── kubeVersion  ← ClusterVersion.Status.Desired.Version → parse kube minor (e.g., "1.35")
 
  2. Build expected API set
     │
-    ├─ Base APIs (OpenShift + Kubernetes combined)
-    │  servedapis.ForProfileAndVersion(profile, featureSet, kubeVersion)
-    │  → OpenShift CRDs (feature-set-aware: 5 CRDs are TP-only, absent on Default)
+    ├─ Base APIs (OpenShift + Kubernetes combined, Default feature set only)
+    │  servedapis.ForProfileAndVersion(profile, kubeVersion)
+    │  → OpenShift CRDs (Default feature set only)
     │  → Aggregated API server resources (openshift-apiserver, oauth-apiserver)
     │  → Optional operator APIs (monitoring, OLM, machine-api, etc.)
     │  → Kubernetes built-in APIs (generated during rebase via scheme + DefaultAPIResourceConfigSource)
@@ -333,6 +333,12 @@ const (
     SourceOAuthAPIServer     Source = "oauth-apiserver"
 )
 
+type ClusterProfile string
+const (
+    ClusterProfileSelfManagedHA ClusterProfile = "SelfManagedHA"
+    ClusterProfileHypershift    ClusterProfile = "Hypershift"
+)
+
 type ServedAPIEntry struct {
     Group    string `json:"group" yaml:"group"`
     Version  string `json:"version" yaml:"version"`
@@ -345,8 +351,12 @@ type ServedAPIEntry struct {
 
 **`servedapis/zz_generated.served_apis.go`** — generated file containing the full inventory data as Go literals. Provides:
 ```go
-// Returns required and optional APIs for a given cluster configuration
-func ForProfileAndVersion(clusterProfile, featureSet, kubeVersion string) (required, optional []ServedAPIEntry, found bool)
+import "k8s.io/apimachinery/pkg/util/version"
+
+// Returns required and optional APIs for a given cluster profile and Kubernetes version
+// Only supports Default feature set - test skips on TechPreview/DevPreview
+// kubeVersion uses only major.minor (patch is ignored) - e.g., "1.35.0" and "1.35.2" both map to the same inventory
+func ForProfileAndVersion(clusterProfile ClusterProfile, kubeVersion *version.Version) (required, optional []ServedAPIEntry, found bool)
 ```
 
 Returns two separate lists:
@@ -365,11 +375,11 @@ Standalone binary following the pattern of `write-available-featuresets`. Takes 
 1. **`generator.go`** — main orchestration:
    - **OpenShift APIs** (per ClusterProfile, FeatureSet):
      - Reads CRD manifests from `payload-manifests/crds/`
-     - Parses filename suffixes and `release.openshift.io/feature-set` annotations
+     - Parses filename suffixes for profile detection (only processes Default feature set CRDs)
      - Extracts served GVRs from each CRD's `spec.versions[].served`, `spec.group`, `spec.names.plural/kind`, `spec.scope`
      - Merges with hardcoded aggregated API server entries
      - Merges with optional API entries
-     - Generates Go variables for each (profile, featureSet) combination
+     - Generates Go variables for each profile (SelfManagedHA, Hypershift) - Default feature set only
    
    - **Kubernetes APIs** (per supported kube version):
      - For each supported kube minor version (e.g., 1.35, 1.36):
@@ -436,29 +446,29 @@ Standalone binary following the pattern of `write-available-featuresets`. Takes 
 
 ### A3. CRD Variant Detection
 
-Two mechanisms determine which (ClusterProfile, FeatureSet) a CRD applies to:
+The generator determines which ClusterProfile a CRD applies to using two mechanisms:
 
 **1. Filename suffix** — determines which CRD schema variant to use:
-- No suffix: same schema for all variants
-- `-Default`, `-TechPreviewNoUpgrade`: feature-set-specific schema
-- `-Hypershift`, `-SelfManagedHA`: profile-specific
-- `-SelfManagedHA-TechPreviewNoUpgrade`: compound
+- No suffix: same schema for all profiles
+- `-Hypershift`, `-SelfManagedHA`: profile-specific schema
+- `-Default`: schema applies to Default feature set (the only one we support)
 
-**2. `release.openshift.io/feature-set` annotation** — determines on which clusters
-the CRD is deployed. This is the critical one for inventory:
-- Absent or empty: CRD is deployed on ALL feature sets
-- `TechPreviewNoUpgrade,DevPreviewNoUpgrade,CustomNoUpgrade`: CRD is **NOT** deployed on Default/production clusters
+**2. Annotations** — determine deployment targets:
+- `include.release.openshift.io/*` annotations determine profile availability:
+  - `ibm-cloud-managed` = Hypershift
+  - `self-managed-high-availability` = SelfManagedHA
+- `release.openshift.io/feature-set` annotation determines feature set deployment:
+  - Absent or empty: CRD is deployed on Default (included in inventory)
+  - `TechPreviewNoUpgrade,DevPreviewNoUpgrade,CustomNoUpgrade`: CRD is **NOT** deployed on Default → **skip this CRD**
 
-Currently **5 CRD resources** are TechPreview-only (absent from Default):
+**TechPreview-only CRDs excluded from inventory** (currently 5 resources):
 - `backups.config.openshift.io`
 - `clustermonitorings.config.openshift.io`
 - `etcdbackups.operator.openshift.io`
 - `ingresses.operator.openshift.io`
 - `pkis.config.openshift.io`
 
-The generator must parse the annotation to determine CRD availability per feature set.
-The `include.release.openshift.io/*` annotations determine profile availability
-(`ibm-cloud-managed` = Hypershift, `self-managed-high-availability` = SelfManaged).
+The generator only processes CRDs available on the Default feature set, creating separate inventories for SelfManagedHA and Hypershift profiles.
 
 ### A4. Output Files
 
@@ -467,19 +477,17 @@ The `include.release.openshift.io/*` annotations determine profile availability
 ```go
 package servedapis
 
-// Required OpenShift API variables (core CRDs, aggregated servers - per profile/featureSet)
-var requiredSelfManagedHADefault = []ServedAPIEntry{ ... }
-var requiredHypershiftDefault = []ServedAPIEntry{ ... }
-// ... etc
+// Required OpenShift API variables (core CRDs, aggregated servers - per profile, Default feature set only)
+var requiredSelfManagedHA = []ServedAPIEntry{ ... }
+var requiredHypershift = []ServedAPIEntry{ ... }
 
-// Optional OpenShift API variables (optional operators - per profile/featureSet)
-var optionalSelfManagedHADefault = []ServedAPIEntry{
+// Optional OpenShift API variables (optional operators - per profile, Default feature set only)
+var optionalSelfManagedHA = []ServedAPIEntry{
     {Group: "monitoring.coreos.com", Version: "v1", Resource: "prometheuses", Kind: "Prometheus", Scope: "Namespaced", Source: SourceOpenShiftCRD},
     {Group: "operators.coreos.com", Version: "v1alpha1", Resource: "subscriptions", Kind: "Subscription", Scope: "Namespaced", Source: SourceOpenShiftCRD},
     // ... monitoring, OLM, machine-api, metal3, etc.
 }
-var optionalHypershiftDefault = []ServedAPIEntry{ ... }
-// ... etc
+var optionalHypershift = []ServedAPIEntry{ ... }
 
 // Kubernetes API variables (one per supported version)
 var kubeAPIs135 = []ServedAPIEntry{
@@ -491,33 +499,35 @@ var kubeAPIs136 = []ServedAPIEntry{ ... }
 var kubeAPIs137 = []ServedAPIEntry{ ... }
 
 // Lookup function - returns required and optional APIs separately
-func ForProfileAndVersion(clusterProfile, featureSet, kubeVersion string) (required, optional []ServedAPIEntry, found bool) {
+func ForProfileAndVersion(clusterProfile ClusterProfile, kubeVersion *version.Version) (required, optional []ServedAPIEntry, found bool) {
     // Get OpenShift APIs (required and optional)
-    key := clusterProfile + "-" + featureSet
     var requiredOpenShift, optionalOpenShift []ServedAPIEntry
-    switch key {
-    case "SelfManagedHA-Default":
-        requiredOpenShift = requiredSelfManagedHADefault
-        optionalOpenShift = optionalSelfManagedHADefault
-    case "Hypershift-Default":
-        requiredOpenShift = requiredHypershiftDefault
-        optionalOpenShift = optionalHypershiftDefault
-    // ... etc
+    switch clusterProfile {
+    case ClusterProfileSelfManagedHA:
+        requiredOpenShift = requiredSelfManagedHA
+        optionalOpenShift = optionalSelfManagedHA
+    case ClusterProfileHypershift:
+        requiredOpenShift = requiredHypershift
+        optionalOpenShift = optionalHypershift
     default:
         return nil, nil, false
     }
     
-    // Get Kubernetes APIs (always required)
+    // Get Kubernetes APIs (always required) - uses major.minor only, ignores patch
     var kubeAPIs []ServedAPIEntry
-    switch kubeVersion {
-    case "1.35":
-        kubeAPIs = kubeAPIs135
-    case "1.36":
-        kubeAPIs = kubeAPIs136
-    case "1.37":
-        kubeAPIs = kubeAPIs137
-    default:
-        return nil, nil, false  // kubeVersion not found
+    if kubeVersion.Major() == 1 {
+        switch kubeVersion.Minor() {
+        case 35:
+            kubeAPIs = kubeAPIs135
+        case 36:
+            kubeAPIs = kubeAPIs136
+        case 37:
+            kubeAPIs = kubeAPIs137
+        default:
+            return nil, nil, false  // minor version not found
+        }
+    } else {
+        return nil, nil, false  // unexpected major version
     }
     
     // Combine and return
@@ -571,8 +581,8 @@ Steps:
    - `kubeVersion` = parse minor version from `ClusterVersion("version").Status.Desired.Version` (e.g., "4.19.0-0.nightly-2026-08-11-225619" → "1.35")
 
 2. **Build expected sets**:
-   - **Base APIs**: `required, optional, found := servedapis.ForProfileAndVersion(profile, featureSet, kubeVersion)` from vendored openshift/api
-     - Returns two separate lists: required APIs and optional APIs
+   - **Base APIs**: `required, optional, found := servedapis.ForProfileAndVersion(profile, kubeVersion)` from vendored openshift/api
+     - Returns two separate lists: required APIs and optional APIs (for Default feature set only)
      - If `found == false` (during rebase window when kubeVersion not generated): skip entire test
    - **Kubernetes overrides**: For each `enabledGate`, look up override entries from `KubeAPIOverridesByFeatureGate` map in openshift/api, filter to those matching `kubeVersion` range, add their GVRs to required list
    - **Convert to sets**: `expectedRequired`, `expectedOptional`
@@ -591,24 +601,29 @@ The test calls a single function from vendored openshift/api:
 ```go
 import (
     "github.com/openshift/api/servedapis"
+    "k8s.io/apimachinery/pkg/util/version"
 )
 
-func parseKubeVersion(clusterVersion string) string {
+func parseKubeVersion(clusterVersionStr string) (*version.Version, error) {
     // ClusterVersion.Status.Desired.Version format: "4.19.0-0.nightly-2026-08-11-225619"
-    // Contains embedded kube version somewhere in metadata/tags
-    // Actual implementation will query kube-apiserver version or parse from
-    // ClusterVersion payload metadata
-    return "1.35"  // placeholder
+    // Actual implementation should query kube-apiserver version or parse from ClusterVersion payload metadata
+    // For now, extract kube version from the cluster version (mapping TBD)
+    // Example: map OCP 4.19 → Kubernetes 1.35
+    
+    // Parse as semver - this handles "1.35.0" or "1.35.2" equally (both → major=1, minor=35)
+    return version.ParseSemantic(kubeVersionString)
 }
 
 // In test body
-profile := clusterProfileName(exutil.GetControlPlaneTopology(oc))
-featureSet := "Default"  // already checked and skipped if not Default
-kubeVersion := parseKubeVersion(clusterVersion)
+profile := clusterProfileName(exutil.GetControlPlaneTopology(oc))  // returns servedapis.ClusterProfile constant
+kubeVersion, err := parseKubeVersion(clusterVersionStr)
+if err != nil {
+    framework.Failf("Failed to parse Kubernetes version: %v", err)
+}
 
-required, optional, found := servedapis.ForProfileAndVersion(profile, featureSet, kubeVersion)
+required, optional, found := servedapis.ForProfileAndVersion(profile, kubeVersion)
 if !found {
-    e2eskipper.Skipf("API inventory for profile=%s featureSet=%s kubeVersion=%s not found. This is expected during Kubernetes rebase.", profile, featureSet, kubeVersion)
+    e2eskipper.Skipf("API inventory for profile=%s kubeVersion=%d.%d not found. This is expected during Kubernetes rebase.", profile, kubeVersion.Major(), kubeVersion.Minor())
 }
 
 // Add override APIs for enabled feature gates (to required list)
@@ -659,9 +674,9 @@ version 1.37 in the generated code, `ForProfileAndVersion()` returns `(nil, nil,
 
 ```go
 // In test body
-required, optional, found := servedapis.ForProfileAndVersion(profile, featureSet, kubeVersion)
+required, optional, found := servedapis.ForProfileAndVersion(profile, kubeVersion)
 if !found {
-    e2eskipper.Skipf("API inventory for profile=%s featureSet=%s kubeVersion=%s not found. This is expected during Kubernetes rebase. Update openshift/api and regenerate servedapis/zz_generated.served_apis.go", profile, featureSet, kubeVersion)
+    e2eskipper.Skipf("API inventory for profile=%s kubeVersion=%d.%d not found. This is expected during Kubernetes rebase. Update openshift/api and regenerate servedapis/zz_generated.served_apis.go", profile, kubeVersion.Major(), kubeVersion.Minor())
 }
 
 // Normal test flow - validate everything
@@ -693,11 +708,11 @@ if !found {
 ### B4. Profile Mapping
 
 ```go
-func clusterProfileName(topology configv1.TopologyMode) string {
+func clusterProfileName(topology configv1.TopologyMode) servedapis.ClusterProfile {
     if topology == configv1.ExternalTopologyMode {
-        return "Hypershift"
+        return servedapis.ClusterProfileHypershift
     }
-    return "SelfManagedHA"
+    return servedapis.ClusterProfileSelfManagedHA
 }
 ```
 
