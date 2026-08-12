@@ -131,23 +131,21 @@ openshift/api                              origin
 │   write-served-api-inventory │     │   served_api_inventory.go   │
 │                              │     │                             │
 │ payload-command/servedapis/  │     │ Detects cluster version,    │
-│   generator.go               │────>│ loads matching static lists:│
-│   aggregated_apis.go         │     │  · servedapis pkg (OpenShift│
-│   optional_apis.go           │     │    CRDs, aggregated servers)│
-│   kube_api_derivation.go     │     │  · kube-apis-{ver}.yaml     │
-│   (scheme + config → GVRs)   │     │  · kube API override map    │
-│                              │     │                             │
-│ features/                    │     │ Queries cluster discovery,  │
-│   kube_api_overrides.go      │────>│ compares bidirectionally    │
+│   generator.go               │────>│ calls vendored functions:   │
+│   aggregated_apis.go         │     │  · servedapis.ForProfile()  │
+│   optional_apis.go           │     │  · servedapis.KubernetesAPIs│
+│   kube_api_derivation.go     │     │  · kube API override map    │
+│   (scheme + config → GVRs)   │     │                             │
+│                              │     │ Queries cluster discovery,  │
+│ features/                    │     │ compares bidirectionally    │
+│   kube_api_overrides.go      │────>│                             │
 │                              │     └─────────────────────────────┘
 │ servedapis/                  │
 │   types.go                   │
-│   zz_generated.served_apis.go│  ← generated, vendored into origin
-│                              │
-│ payload-manifests/served-apis│
-│   servedAPIs-*.yaml          │  ← OpenShift APIs (CRDs, etc.)
-│   kube-apis-1.35.yaml        │  ← Kubernetes APIs per version
-│   kube-apis-1.36.yaml        │  ← (scheme-derived during rebase)
+│   zz_generated.served_apis.go│  ← generated Go code, vendored
+│     · ForProfile() function  │     into origin automatically
+│     · KubernetesAPIs() fn    │
+│     · all inventory as vars  │
 └──────────────────────────────┘
 ```
 
@@ -155,15 +153,16 @@ openshift/api                              origin
 
 Instead of maintaining a `kube_apis.go` with ~100+ Kubernetes resource entries, the
 Kubernetes API inventory is **generated during rebase** in openshift/api. The generator
-runs once per supported Kubernetes version and outputs **versioned static files**:
-- `payload-manifests/served-apis/kube-apis-1.35.yaml`
-- `payload-manifests/served-apis/kube-apis-1.36.yaml`
+runs once per supported Kubernetes version and outputs **versioned data as Go variables**
+in `zz_generated.served_apis.go`:
+- `var kubeAPIs135 = []ServedAPIEntry{ ... }`
+- `var kubeAPIs136 = []ServedAPIEntry{ ... }`
 - etc.
 
-**Why per-version files:** The test runs against a live cluster whose Kubernetes version
+**Why per-version data:** The test runs against a live cluster whose Kubernetes version
 may not match what's vendored in the origin test binary (during rebase windows, in dev
-environments). The test queries the cluster's version and loads the matching file, making
-it robust to version skew.
+environments). The test queries the cluster's version and calls `KubernetesAPIs(version)` to get
+the matching data, making it robust to version skew.
 
 ### How Kubernetes API derivation works
 
@@ -322,14 +321,18 @@ type ServedAPIEntry struct {
 
 **`servedapis/zz_generated.served_apis.go`** — generated file containing the full inventory data as Go literals. Provides:
 ```go
+// OpenShift APIs by profile and feature set
 func ForProfile(clusterProfile, featureSet string) []ServedAPIEntry
+
+// Kubernetes APIs by version
+func KubernetesAPIs(kubeVersion string) ([]ServedAPIEntry, bool)
 ```
 
-This file gets vendored into origin automatically.
+This file gets vendored into origin automatically. Contains all inventory data - both OpenShift and Kubernetes APIs.
 
 ### A2. Generator Tool — `payload-command/cmd/write-served-api-inventory/`
 
-Standalone binary following the pattern of `write-available-featuresets`. Takes `--asset-output-dir` flag for YAML output and `--go-output-dir` for the generated Go file.
+Standalone binary following the pattern of `write-available-featuresets`. Takes `--go-output-dir` flag for the generated Go file.
 
 **Generator logic** in `payload-command/servedapis/`:
 
@@ -340,14 +343,15 @@ Standalone binary following the pattern of `write-available-featuresets`. Takes 
      - Extracts served GVRs from each CRD's `spec.versions[].served`, `spec.group`, `spec.names.plural/kind`, `spec.scope`
      - Merges with hardcoded aggregated API server entries
      - Merges with optional API entries
-     - Outputs `servedAPIs-{profile}-{featureSet}.yaml` files
-     - Outputs `zz_generated.served_apis.go`
+     - Generates Go variables for each (profile, featureSet) combination
    
    - **Kubernetes APIs** (per supported kube version):
      - For each supported kube minor version (e.g., 1.35, 1.36):
        - Derives from vendored scheme + `DefaultAPIResourceConfigSource()`
        - Filters and converts to GVRs
-       - Outputs `kube-apis-{version}.yaml`
+       - Generates Go variable per version (e.g., `kubeAPIs135`, `kubeAPIs136`)
+   
+   - **Output**: Single `zz_generated.served_apis.go` file containing all inventory data as Go literals
 
 2. **`kube_api_derivation.go`** — scheme-based Kubernetes API derivation. Runs once per supported kube version:
    ```go
@@ -432,26 +436,55 @@ The `include.release.openshift.io/*` annotations determine profile availability
 
 ### A4. Output Files
 
-**YAML** (in `payload-manifests/served-apis/`):
+**`servedapis/zz_generated.served_apis.go`** — single generated Go file containing all inventory data:
 
-**OpenShift APIs** (per ClusterProfile × FeatureSet):
-- `servedAPIs-SelfManagedHA-Default.yaml`
-- `servedAPIs-SelfManagedHA-TechPreviewNoUpgrade.yaml`
-- `servedAPIs-SelfManagedHA-DevPreviewNoUpgrade.yaml`
-- `servedAPIs-SelfManagedHA-OKD.yaml`
-- `servedAPIs-Hypershift-Default.yaml`
-- `servedAPIs-Hypershift-TechPreviewNoUpgrade.yaml`
-- `servedAPIs-Hypershift-DevPreviewNoUpgrade.yaml`
-- `servedAPIs-Hypershift-OKD.yaml`
+```go
+package servedapis
 
-**Kubernetes APIs** (per supported Kubernetes version):
-- `kube-apis-1.35.yaml`
-- `kube-apis-1.36.yaml`
-- `kube-apis-1.37.yaml` (added as new versions are supported)
+// OpenShift API variables (one per profile/featureSet combination)
+var openshiftAPIsSelfManagedHADefault = []ServedAPIEntry{ ... }
+var openshiftAPIsSelfManagedHATechPreview = []ServedAPIEntry{ ... }
+var openshiftAPIsHypershiftDefault = []ServedAPIEntry{ ... }
+// ... etc
 
-Each YAML file is a sorted list of `ServedAPIEntry` records. Sorted by (group, version, resource) for stable diffs.
+// Kubernetes API variables (one per supported version)
+var kubeAPIs135 = []ServedAPIEntry{
+    {Group: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment", Scope: "Namespaced", Source: SourceCoreKube},
+    {Group: "apps", Version: "v1", Resource: "statefulsets", Kind: "StatefulSet", Scope: "Namespaced", Source: SourceCoreKube},
+    // ... ~100+ entries per version
+}
+var kubeAPIs136 = []ServedAPIEntry{ ... }
+var kubeAPIs137 = []ServedAPIEntry{ ... }
 
-**Go** (`servedapis/zz_generated.served_apis.go`): OpenShift API data as Go literals with a lookup function. Kubernetes API files remain as YAML (loaded/embedded at test time).
+// Lookup functions
+func ForProfile(clusterProfile, featureSet string) []ServedAPIEntry {
+    key := clusterProfile + "-" + featureSet
+    switch key {
+    case "SelfManagedHA-Default":
+        return openshiftAPIsSelfManagedHADefault
+    case "Hypershift-Default":
+        return openshiftAPIsHypershiftDefault
+    // ... etc
+    default:
+        return nil
+    }
+}
+
+func KubernetesAPIs(kubeVersion string) ([]ServedAPIEntry, bool) {
+    switch kubeVersion {
+    case "1.35":
+        return kubeAPIs135, true
+    case "1.36":
+        return kubeAPIs136, true
+    case "1.37":
+        return kubeAPIs137, true
+    default:
+        return nil, false  // version not found
+    }
+}
+```
+
+All data is Go code - no YAML parsing needed. Entries are sorted by (group, version, resource) for stable diffs in code review.
 
 ### A5. Build System
 
@@ -459,10 +492,8 @@ New scripts following the `update-payload-featuregates.sh` pattern:
 
 **`hack/update-served-api-inventory.sh`**:
 ```bash
-rm -f ./payload-manifests/served-apis/*
 go run --mod=vendor github.com/openshift/api/payload-command/cmd/write-served-api-inventory \
   --crd-dir=./payload-manifests/crds \
-  --yaml-output-dir=./payload-manifests/served-apis \
   --go-output-dir=./servedapis
 ```
 
@@ -497,11 +528,11 @@ Steps:
 
 2. **Build expected set**:
    - **OpenShift APIs**: `servedapis.ForProfile(profile, featureSet)` from vendored openshift/api → CRDs + aggregated servers + optional
-   - **Kubernetes APIs**: Try to load `kube-apis-{kubeVersion}.yaml` from vendored openshift/api (embedded or filesystem)
-     - If file exists: use it
-     - If file missing (during rebase window): log warning and skip Kubernetes API validation
+   - **Kubernetes APIs**: `servedapis.KubernetesAPIs(kubeVersion)` from vendored openshift/api
+     - Returns `(apis, found bool)`
+     - If `found == false` (during rebase window): skip entire test
    - **Kubernetes overrides**: For each `enabledGate`, look up override entries from `KubeAPIOverridesByFeatureGate` map in openshift/api, filter to those matching `kubeVersion` range, add their GVRs
-   - **Merge** available sources into expected set
+   - **Merge** all sources into expected set
 
 3. **Query actual APIs**: `kubeClient.Discovery().ServerGroupsAndResources()` — filter out subresources (resource names containing `/`)
 
@@ -512,38 +543,12 @@ Steps:
 
 ### B5. Loading Kubernetes APIs
 
-The test loads per-version Kubernetes API lists generated during openshift/api rebase:
+The test calls the generated function from vendored openshift/api:
 
 ```go
 import (
-    _ "embed"
-    "gopkg.in/yaml.v2"
+    "github.com/openshift/api/servedapis"
 )
-
-//go:embed kube-apis-1.35.yaml
-var kubeAPIs135 []byte
-
-//go:embed kube-apis-1.36.yaml
-var kubeAPIs136 []byte
-
-func loadKubernetesAPIs(kubeVersion string) ([]ServedAPIEntry, bool, error) {
-    var data []byte
-    switch kubeVersion {
-    case "1.35":
-        data = kubeAPIs135
-    case "1.36":
-        data = kubeAPIs136
-    default:
-        // Version file doesn't exist (rebase window) - skip Kubernetes validation
-        return nil, false, nil  // empty, shouldSkip=true, no error
-    }
-    
-    var apis []ServedAPIEntry
-    if err := yaml.Unmarshal(data, &apis); err != nil {
-        return nil, false, err  // parse error is a real failure
-    }
-    return apis, true, nil  // apis, shouldValidate=true, no error
-}
 
 func parseKubeVersion(clusterVersion string) string {
     // ClusterVersion.Status.Desired.Version format: "4.19.0-0.nightly-2026-08-11-225619"
@@ -552,29 +557,33 @@ func parseKubeVersion(clusterVersion string) string {
     // ClusterVersion payload metadata
     return "1.35"  // placeholder
 }
+
+// In test body
+kubeVersion := parseKubeVersion(clusterVersion)
+kubeAPIs, found := servedapis.KubernetesAPIs(kubeVersion)
+if !found {
+    e2eskipper.Skipf("Kubernetes API inventory for version %s not found...", kubeVersion)
+}
 ```
 
-**Why version-specific files:**
+**Why version-specific data:**
 - Test binary may have different vendored k8s.io dependencies than the live cluster
 - Cluster may be n-1 or n+1 from what the test binary was built against
-- Static lists are generated once per supported kube version during openshift/api rebase
-- Test runtime queries cluster version and loads matching file — no scheme needed
+- Static data is generated once per supported kube version during openshift/api rebase
+- Test runtime queries cluster version and loads matching data — no scheme needed
 - Eliminates version skew problems entirely
+- All in Go code, no YAML parsing needed
 
-**Handling missing version files (during rebase):**
+**Handling missing version data (during rebase):**
 
-When a cluster is running Kubernetes 1.37 but openshift/api hasn't been updated yet to generate
-`kube-apis-1.37.yaml`, the test skips entirely:
+When a cluster is running Kubernetes 1.37 but openshift/api hasn't been updated yet to include
+version 1.37 in the generated code, the test skips entirely:
 
 ```go
 // In test body
-kubeAPIs, shouldValidate, err := loadKubernetesAPIs(kubeVersion)
-if err != nil {
-    framework.Failf("Failed to load Kubernetes APIs: %v", err)
-}
-
-if !shouldValidate {
-    e2eskipper.Skipf("Kubernetes API inventory for version %s not found. This is expected during Kubernetes rebase. Update openshift/api to generate kube-apis-%s.yaml", kubeVersion, kubeVersion)
+kubeAPIs, found := servedapis.KubernetesAPIs(kubeVersion)
+if !found {
+    e2eskipper.Skipf("Kubernetes API inventory for version %s not found. This is expected during Kubernetes rebase. Update openshift/api and regenerate servedapis/zz_generated.served_apis.go", kubeVersion)
 }
 
 // Normal test flow - validate everything
