@@ -564,7 +564,7 @@ func parseKubeVersion(clusterVersion string) string {
 **Handling missing version files (during rebase):**
 
 When a cluster is running Kubernetes 1.37 but openshift/api hasn't been updated yet to generate
-`kube-apis-1.37.yaml`, the test skips Kubernetes API validation rather than failing:
+`kube-apis-1.37.yaml`, the test skips entirely:
 
 ```go
 // In test body
@@ -573,31 +573,27 @@ if err != nil {
     framework.Failf("Failed to load Kubernetes APIs: %v", err)
 }
 
-var expected sets.Set[schema.GroupVersionResource]
 if !shouldValidate {
-    framework.Logf("WARNING: Kubernetes API inventory for version %s not found - skipping Kubernetes API validation", kubeVersion)
-    framework.Logf("This is expected during Kubernetes rebase. Update openshift/api after rebase completes.")
-    framework.Logf("Only validating OpenShift APIs (CRDs, aggregated servers, optional operators)")
-    
-    // Build expected set without Kubernetes APIs
-    expected = openshiftAPIs.Union(overrideAPIs)
-} else {
-    // Normal case: validate everything
-    expected = openshiftAPIs.Union(kubeAPIs).Union(overrideAPIs)
+    e2eskipper.Skipf("Kubernetes API inventory for version %s not found. This is expected during Kubernetes rebase. Update openshift/api to generate kube-apis-%s.yaml", kubeVersion, kubeVersion)
 }
+
+// Normal test flow - validate everything
+expected := openshiftAPIs.Union(kubeAPIs).Union(overrideAPIs)
+// ... continue with discovery and comparison
 ```
 
-**Why skip instead of failing:**
-- During rebase, multiple repos update in sequence (kubernetes → openshift/api → origin)
-- Test would block all CI if it failed on missing file
-- OpenShift API validation (CRDs, aggregated servers) still works
-- Warning is visible in test output, makes it clear what's not being validated
+**Why skip the entire test:**
+- Simple - no complex logic to filter Kubernetes APIs from comparison
+- Ginkgo marks as skipped (yellow in CI), not passed (green) - clear signal validation is incomplete
+- Forces attention during rebase - can't be ignored like a warning
+- During rebase, repos update in sequence (kubernetes → openshift/api → origin)
+- Once openshift/api is updated with new version file, test automatically starts running again
+- Prevents test from blocking CI during rebase window
 
-**Why not fall back to closest version:**
-- API promotions (v1beta1 → v1) would cause "unexpected API" failures
-- New APIs added in 1.37 would cause "unexpected API" failures  
-- Removed APIs would cause "missing API" failures
-- Stale data creates confusing failures instead of clear "update needed" message
+**Why not validate OpenShift APIs only:**
+- Would need complex group filtering to avoid "unexpected API" failures on Kubernetes APIs
+- Partial validation is misleading - better to be explicit that validation is incomplete
+- Simpler to skip and wait for openshift/api update
 
 ### B3. Helpers to Reuse
 
