@@ -93,15 +93,12 @@ cluster, and compares:
 
  2. Build expected API set
     │
-    ├─ OpenShift APIs (from vendored openshift/api servedapis package)
-    │  servedapis.ForProfile(profile, featureSet)
+    ├─ Base APIs (OpenShift + Kubernetes combined)
+    │  servedapis.ForProfileAndVersion(profile, featureSet, kubeVersion)
     │  → OpenShift CRDs (feature-set-aware: 5 CRDs are TP-only, absent on Default)
     │  → Aggregated API server resources (openshift-apiserver, oauth-apiserver)
     │  → Optional operator APIs (monitoring, OLM, machine-api, etc.)
-    │
-    ├─ Kubernetes APIs (from pre-generated per-version data in openshift/api)
-    │  Call servedapis.KubernetesAPIs(kubeVersion) from vendored openshift/api
-    │  → generated during rebase via scheme + DefaultAPIResourceConfigSource
+    │  → Kubernetes built-in APIs (generated during rebase via scheme + DefaultAPIResourceConfigSource)
     │  → versioned to handle skew between test binary and cluster
     │
     └─ Kubernetes overrides (OpenShift feature gates that enable extra k8s APIs)
@@ -131,20 +128,19 @@ openshift/api                              origin
 │   write-served-api-inventory │     │   served_api_inventory.go   │
 │                              │     │                             │
 │ payload-command/servedapis/  │     │ Detects cluster version,    │
-│   generator.go               │────>│ calls vendored functions:   │
-│   aggregated_apis.go         │     │  · servedapis.ForProfile()  │
-│   optional_apis.go           │     │  · servedapis.KubernetesAPIs│
-│   kube_api_derivation.go     │     │  · kube API override map    │
-│   (scheme + config → GVRs)   │     │                             │
-│                              │     │ Queries cluster discovery,  │
-│ features/                    │     │ compares bidirectionally    │
+│   generator.go               │────>│ calls vendored function:    │
+│   aggregated_apis.go         │     │  · ForProfileAndVersion()   │
+│   optional_apis.go           │     │  · kube API override map    │
+│   kube_api_derivation.go     │     │                             │
+│   (scheme + config → GVRs)   │     │ Queries cluster discovery,  │
+│                              │     │ compares bidirectionally    │
+│ features/                    │     │                             │
 │   kube_api_overrides.go      │────>│                             │
 │                              │     └─────────────────────────────┘
 │ servedapis/                  │
 │   types.go                   │
 │   zz_generated.served_apis.go│  ← generated Go code, vendored
-│     · ForProfile() function  │     into origin automatically
-│     · KubernetesAPIs() fn    │
+│     · ForProfileAndVersion() │     into origin automatically
 │     · all inventory as vars  │
 └──────────────────────────────┘
 ```
@@ -161,8 +157,8 @@ in `zz_generated.served_apis.go`:
 
 **Why per-version data:** The test runs against a live cluster whose Kubernetes version
 may not match what's vendored in the origin test binary (during rebase windows, in dev
-environments). The test queries the cluster's version and calls `KubernetesAPIs(version)` to get
-the matching data, making it robust to version skew.
+environments). The test queries the cluster's version and calls `ForProfileAndVersion()` with it,
+getting the matching data for both OpenShift and Kubernetes APIs, making it robust to version skew.
 
 ### How Kubernetes API derivation works
 
@@ -350,12 +346,13 @@ type ServedAPIEntry struct {
 
 **`servedapis/zz_generated.served_apis.go`** — generated file containing the full inventory data as Go literals. Provides:
 ```go
-// OpenShift APIs by profile and feature set
-func ForProfile(clusterProfile, featureSet string) []ServedAPIEntry
-
-// Kubernetes APIs by version
-func KubernetesAPIs(kubeVersion string) ([]ServedAPIEntry, bool)
+// Combined OpenShift + Kubernetes APIs for a given cluster configuration
+func ForProfileAndVersion(clusterProfile, featureSet, kubeVersion string) ([]ServedAPIEntry, bool)
 ```
+
+Returns all APIs (OpenShift + Kubernetes) for the given configuration. The bool indicates whether
+the Kubernetes version is found; returns false during rebase windows when the version isn't
+generated yet.
 
 This file gets vendored into origin automatically. Contains all inventory data - both OpenShift and Kubernetes APIs.
 
@@ -485,31 +482,36 @@ var kubeAPIs135 = []ServedAPIEntry{
 var kubeAPIs136 = []ServedAPIEntry{ ... }
 var kubeAPIs137 = []ServedAPIEntry{ ... }
 
-// Lookup functions
-func ForProfile(clusterProfile, featureSet string) []ServedAPIEntry {
+// Lookup function - returns combined OpenShift + Kubernetes APIs
+func ForProfileAndVersion(clusterProfile, featureSet, kubeVersion string) ([]ServedAPIEntry, bool) {
+    // Get OpenShift APIs
     key := clusterProfile + "-" + featureSet
+    var openshiftAPIs []ServedAPIEntry
     switch key {
     case "SelfManagedHA-Default":
-        return openshiftAPIsSelfManagedHADefault
+        openshiftAPIs = openshiftAPIsSelfManagedHADefault
     case "Hypershift-Default":
-        return openshiftAPIsHypershiftDefault
+        openshiftAPIs = openshiftAPIsHypershiftDefault
     // ... etc
     default:
-        return nil
+        return nil, false
     }
-}
-
-func KubernetesAPIs(kubeVersion string) ([]ServedAPIEntry, bool) {
+    
+    // Get Kubernetes APIs
+    var kubeAPIs []ServedAPIEntry
     switch kubeVersion {
     case "1.35":
-        return kubeAPIs135, true
+        kubeAPIs = kubeAPIs135
     case "1.36":
-        return kubeAPIs136, true
+        kubeAPIs = kubeAPIs136
     case "1.37":
-        return kubeAPIs137, true
+        kubeAPIs = kubeAPIs137
     default:
-        return nil, false  // version not found
+        return nil, false  // kubeVersion not found
     }
+    
+    // Combine and return
+    return append(openshiftAPIs, kubeAPIs...), true
 }
 ```
 
@@ -557,12 +559,11 @@ Steps:
    - `kubeVersion` = parse minor version from `ClusterVersion("version").Status.Desired.Version` (e.g., "4.19.0-0.nightly-2026-08-11-225619" → "1.35")
 
 2. **Build expected set**:
-   - **OpenShift APIs**: `servedapis.ForProfile(profile, featureSet)` from vendored openshift/api → CRDs + aggregated servers + optional
-   - **Kubernetes APIs**: `servedapis.KubernetesAPIs(kubeVersion)` from vendored openshift/api
-     - Returns `(apis, found bool)`
-     - If `found == false` (during rebase window): skip entire test
+   - **Base APIs**: `servedapis.ForProfileAndVersion(profile, featureSet, kubeVersion)` from vendored openshift/api
+     - Returns `(apis, found bool)` — all OpenShift + Kubernetes APIs for this configuration
+     - If `found == false` (during rebase window when kubeVersion not generated): skip entire test
    - **Kubernetes overrides**: For each `enabledGate`, look up override entries from `KubeAPIOverridesByFeatureGate` map in openshift/api, filter to those matching `kubeVersion` range, add their GVRs
-   - **Merge** all sources into expected set
+   - **Merge**: base APIs + override APIs = expected set
 
 3. **Query actual APIs**: `kubeClient.Discovery().ServerGroupsAndResources()` — filter out subresources (resource names containing `/`)
 
@@ -571,9 +572,9 @@ Steps:
    - Every served API not in expected (required or optional) → **FAIL** with clear message listing unexpected GVRs
    - Optional API not served → **OK** (logged for visibility)
 
-### B5. Loading Kubernetes APIs
+### B5. Loading API Inventory
 
-The test calls the generated function from vendored openshift/api:
+The test calls a single function from vendored openshift/api:
 
 ```go
 import (
@@ -589,10 +590,20 @@ func parseKubeVersion(clusterVersion string) string {
 }
 
 // In test body
+profile := clusterProfileName(exutil.GetControlPlaneTopology(oc))
+featureSet := "Default"  // already checked and skipped if not Default
 kubeVersion := parseKubeVersion(clusterVersion)
-kubeAPIs, found := servedapis.KubernetesAPIs(kubeVersion)
+
+baseAPIs, found := servedapis.ForProfileAndVersion(profile, featureSet, kubeVersion)
 if !found {
-    e2eskipper.Skipf("Kubernetes API inventory for version %s not found...", kubeVersion)
+    e2eskipper.Skipf("API inventory for profile=%s featureSet=%s kubeVersion=%s not found. This is expected during Kubernetes rebase.", profile, featureSet, kubeVersion)
+}
+
+// Add override APIs for enabled feature gates
+expected := baseAPIs
+for _, gate := range enabledGates {
+    overrides := getOverridesForGate(gate, kubeVersion)
+    expected = append(expected, overrides...)
 }
 ```
 
@@ -607,17 +618,17 @@ if !found {
 **Handling missing version data (during rebase):**
 
 When a cluster is running Kubernetes 1.37 but openshift/api hasn't been updated yet to include
-version 1.37 in the generated code, the test skips entirely:
+version 1.37 in the generated code, `ForProfileAndVersion()` returns `(nil, false)` and the test skips:
 
 ```go
 // In test body
-kubeAPIs, found := servedapis.KubernetesAPIs(kubeVersion)
+baseAPIs, found := servedapis.ForProfileAndVersion(profile, featureSet, kubeVersion)
 if !found {
-    e2eskipper.Skipf("Kubernetes API inventory for version %s not found. This is expected during Kubernetes rebase. Update openshift/api and regenerate servedapis/zz_generated.served_apis.go", kubeVersion)
+    e2eskipper.Skipf("API inventory for profile=%s featureSet=%s kubeVersion=%s not found. This is expected during Kubernetes rebase. Update openshift/api and regenerate servedapis/zz_generated.served_apis.go", profile, featureSet, kubeVersion)
 }
 
 // Normal test flow - validate everything
-expected := openshiftAPIs.Union(kubeAPIs).Union(overrideAPIs)
+expected := baseAPIs.Union(overrideAPIs)
 // ... continue with discovery and comparison
 ```
 
@@ -702,7 +713,7 @@ During a Kubernetes rebase in openshift/api:
 
 **What needs manual attention**:
 - **Kubernetes API override map**: If the rebase changes which alpha/beta APIs exist for a feature-gate-enabled GroupVersion (e.g., `v1alpha1` → `v1beta1` for MutatingAdmissionPolicy), update `features/kube_api_overrides.go`
-- **New kube version**: Add new case to `KubernetesAPIs()` function and generate new `kubeAPIs{newVersion}` variable
+- **New kube version**: Add new case to `ForProfileAndVersion()` function and generate new `kubeAPIs{newVersion}` variable
 - **OpenShift CRD changes**: If the rebase changes OpenShift CRDs, `make update` regenerates both kube and OpenShift inventories
 
 ### Per-version override map
@@ -777,7 +788,7 @@ The test **skips** on TechPreview and DevPreview feature sets:
 2. **openshift/api rebase**: After k8s vendor bump → `make update` → review diff in `zz_generated.served_apis.go`
 3. **origin e2e**: Test runs as `[Suite:openshift/conformance/parallel]` on SelfManaged and HyperShift clusters with Default feature set (skips TechPreview/DevPreview to avoid volatility)
 4. **During development**: After modifying CRDs or feature gates → `make update` in openshift/api → review diff
-5. **Version skew handled**: Test queries cluster version and calls `KubernetesAPIs(version)`, eliminating test-binary vs cluster-version mismatch
+5. **Version skew handled**: Test queries cluster version and calls `ForProfileAndVersion()` with it, eliminating test-binary vs cluster-version mismatch
 
 ---
 
@@ -802,7 +813,7 @@ The test **skips** on TechPreview and DevPreview feature sets:
 
 8. Vendor updated openshift/api
 9. Create `test/extended/apiserver/served_api_inventory.go`:
-   - Call `servedapis.ForProfile()` and `servedapis.KubernetesAPIs()` from vendored openshift/api
+   - Call `servedapis.ForProfileAndVersion()` from vendored openshift/api
    - Detect cluster profile, feature set, kube version
    - Build expected sets from three sources
    - Query discovery
