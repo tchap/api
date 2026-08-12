@@ -497,9 +497,11 @@ Steps:
 
 2. **Build expected set**:
    - **OpenShift APIs**: `servedapis.ForProfile(profile, featureSet)` from vendored openshift/api → CRDs + aggregated servers + optional
-   - **Kubernetes APIs**: Load `kube-apis-{kubeVersion}.yaml` from vendored openshift/api (embedded or filesystem)
+   - **Kubernetes APIs**: Try to load `kube-apis-{kubeVersion}.yaml` from vendored openshift/api (embedded or filesystem)
+     - If file exists: use it
+     - If file missing (during rebase window): log warning and skip Kubernetes API validation
    - **Kubernetes overrides**: For each `enabledGate`, look up override entries from `KubeAPIOverridesByFeatureGate` map in openshift/api, filter to those matching `kubeVersion` range, add their GVRs
-   - **Merge** all three into one expected set
+   - **Merge** available sources into expected set
 
 3. **Query actual APIs**: `kubeClient.Discovery().ServerGroupsAndResources()` — filter out subresources (resource names containing `/`)
 
@@ -524,7 +526,7 @@ var kubeAPIs135 []byte
 //go:embed kube-apis-1.36.yaml
 var kubeAPIs136 []byte
 
-func loadKubernetesAPIs(kubeVersion string) ([]ServedAPIEntry, error) {
+func loadKubernetesAPIs(kubeVersion string) ([]ServedAPIEntry, bool, error) {
     var data []byte
     switch kubeVersion {
     case "1.35":
@@ -532,14 +534,15 @@ func loadKubernetesAPIs(kubeVersion string) ([]ServedAPIEntry, error) {
     case "1.36":
         data = kubeAPIs136
     default:
-        return nil, fmt.Errorf("unsupported kube version %s", kubeVersion)
+        // Version file doesn't exist (rebase window) - skip Kubernetes validation
+        return nil, false, nil  // empty, shouldSkip=true, no error
     }
     
     var apis []ServedAPIEntry
     if err := yaml.Unmarshal(data, &apis); err != nil {
-        return nil, err
+        return nil, false, err  // parse error is a real failure
     }
-    return apis, nil
+    return apis, true, nil  // apis, shouldValidate=true, no error
 }
 
 func parseKubeVersion(clusterVersion string) string {
@@ -557,6 +560,44 @@ func parseKubeVersion(clusterVersion string) string {
 - Static lists are generated once per supported kube version during openshift/api rebase
 - Test runtime queries cluster version and loads matching file — no scheme needed
 - Eliminates version skew problems entirely
+
+**Handling missing version files (during rebase):**
+
+When a cluster is running Kubernetes 1.37 but openshift/api hasn't been updated yet to generate
+`kube-apis-1.37.yaml`, the test skips Kubernetes API validation rather than failing:
+
+```go
+// In test body
+kubeAPIs, shouldValidate, err := loadKubernetesAPIs(kubeVersion)
+if err != nil {
+    framework.Failf("Failed to load Kubernetes APIs: %v", err)
+}
+
+var expected sets.Set[schema.GroupVersionResource]
+if !shouldValidate {
+    framework.Logf("WARNING: Kubernetes API inventory for version %s not found - skipping Kubernetes API validation", kubeVersion)
+    framework.Logf("This is expected during Kubernetes rebase. Update openshift/api after rebase completes.")
+    framework.Logf("Only validating OpenShift APIs (CRDs, aggregated servers, optional operators)")
+    
+    // Build expected set without Kubernetes APIs
+    expected = openshiftAPIs.Union(overrideAPIs)
+} else {
+    // Normal case: validate everything
+    expected = openshiftAPIs.Union(kubeAPIs).Union(overrideAPIs)
+}
+```
+
+**Why skip instead of failing:**
+- During rebase, multiple repos update in sequence (kubernetes → openshift/api → origin)
+- Test would block all CI if it failed on missing file
+- OpenShift API validation (CRDs, aggregated servers) still works
+- Warning is visible in test output, makes it clear what's not being validated
+
+**Why not fall back to closest version:**
+- API promotions (v1beta1 → v1) would cause "unexpected API" failures
+- New APIs added in 1.37 would cause "unexpected API" failures  
+- Removed APIs would cause "missing API" failures
+- Stale data creates confusing failures instead of clear "update needed" message
 
 ### B3. Helpers to Reuse
 
