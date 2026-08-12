@@ -331,7 +331,6 @@ const (
     SourceOpenShiftCRD       Source = "openshift-crd"
     SourceOpenShiftAPIServer Source = "openshift-apiserver"
     SourceOAuthAPIServer     Source = "oauth-apiserver"
-    SourceOptional           Source = "optional"
 )
 
 type ServedAPIEntry struct {
@@ -340,19 +339,20 @@ type ServedAPIEntry struct {
     Resource string `json:"resource" yaml:"resource"`
     Kind     string `json:"kind" yaml:"kind"`
     Scope    string `json:"scope" yaml:"scope"`       // "Namespaced" or "Cluster"
-    Source   Source `json:"source" yaml:"source"`
+    Source   Source `json:"source" yaml:"source"`     // where the API comes from
 }
 ```
 
 **`servedapis/zz_generated.served_apis.go`** — generated file containing the full inventory data as Go literals. Provides:
 ```go
-// Combined OpenShift + Kubernetes APIs for a given cluster configuration
-func ForProfileAndVersion(clusterProfile, featureSet, kubeVersion string) ([]ServedAPIEntry, bool)
+// Returns required and optional APIs for a given cluster configuration
+func ForProfileAndVersion(clusterProfile, featureSet, kubeVersion string) (required, optional []ServedAPIEntry, found bool)
 ```
 
-Returns all APIs (OpenShift + Kubernetes) for the given configuration. The bool indicates whether
-the Kubernetes version is found; returns false during rebase windows when the version isn't
-generated yet.
+Returns two separate lists:
+- **required**: APIs that must be present (test fails if missing) - core Kubernetes, OpenShift CRDs, aggregated servers
+- **optional**: APIs from optional operators (test logs if missing, doesn't fail) - monitoring, OLM, machine-api, etc.
+- **found**: false during rebase windows when the Kubernetes version isn't generated yet
 
 This file gets vendored into origin automatically. Contains all inventory data - both OpenShift and Kubernetes APIs.
 
@@ -467,10 +467,18 @@ The `include.release.openshift.io/*` annotations determine profile availability
 ```go
 package servedapis
 
-// OpenShift API variables (one per profile/featureSet combination)
-var openshiftAPIsSelfManagedHADefault = []ServedAPIEntry{ ... }
-var openshiftAPIsSelfManagedHATechPreview = []ServedAPIEntry{ ... }
-var openshiftAPIsHypershiftDefault = []ServedAPIEntry{ ... }
+// Required OpenShift API variables (core CRDs, aggregated servers - per profile/featureSet)
+var requiredSelfManagedHADefault = []ServedAPIEntry{ ... }
+var requiredHypershiftDefault = []ServedAPIEntry{ ... }
+// ... etc
+
+// Optional OpenShift API variables (optional operators - per profile/featureSet)
+var optionalSelfManagedHADefault = []ServedAPIEntry{
+    {Group: "monitoring.coreos.com", Version: "v1", Resource: "prometheuses", Kind: "Prometheus", Scope: "Namespaced", Source: SourceOpenShiftCRD},
+    {Group: "operators.coreos.com", Version: "v1alpha1", Resource: "subscriptions", Kind: "Subscription", Scope: "Namespaced", Source: SourceOpenShiftCRD},
+    // ... monitoring, OLM, machine-api, metal3, etc.
+}
+var optionalHypershiftDefault = []ServedAPIEntry{ ... }
 // ... etc
 
 // Kubernetes API variables (one per supported version)
@@ -482,22 +490,24 @@ var kubeAPIs135 = []ServedAPIEntry{
 var kubeAPIs136 = []ServedAPIEntry{ ... }
 var kubeAPIs137 = []ServedAPIEntry{ ... }
 
-// Lookup function - returns combined OpenShift + Kubernetes APIs
-func ForProfileAndVersion(clusterProfile, featureSet, kubeVersion string) ([]ServedAPIEntry, bool) {
-    // Get OpenShift APIs
+// Lookup function - returns required and optional APIs separately
+func ForProfileAndVersion(clusterProfile, featureSet, kubeVersion string) (required, optional []ServedAPIEntry, found bool) {
+    // Get OpenShift APIs (required and optional)
     key := clusterProfile + "-" + featureSet
-    var openshiftAPIs []ServedAPIEntry
+    var requiredOpenShift, optionalOpenShift []ServedAPIEntry
     switch key {
     case "SelfManagedHA-Default":
-        openshiftAPIs = openshiftAPIsSelfManagedHADefault
+        requiredOpenShift = requiredSelfManagedHADefault
+        optionalOpenShift = optionalSelfManagedHADefault
     case "Hypershift-Default":
-        openshiftAPIs = openshiftAPIsHypershiftDefault
+        requiredOpenShift = requiredHypershiftDefault
+        optionalOpenShift = optionalHypershiftDefault
     // ... etc
     default:
-        return nil, false
+        return nil, nil, false
     }
     
-    // Get Kubernetes APIs
+    // Get Kubernetes APIs (always required)
     var kubeAPIs []ServedAPIEntry
     switch kubeVersion {
     case "1.35":
@@ -507,11 +517,13 @@ func ForProfileAndVersion(clusterProfile, featureSet, kubeVersion string) ([]Ser
     case "1.37":
         kubeAPIs = kubeAPIs137
     default:
-        return nil, false  // kubeVersion not found
+        return nil, nil, false  // kubeVersion not found
     }
     
     // Combine and return
-    return append(openshiftAPIs, kubeAPIs...), true
+    required = append(requiredOpenShift, kubeAPIs...)
+    optional = optionalOpenShift
+    return required, optional, true
 }
 ```
 
@@ -558,18 +570,18 @@ Steps:
    - `enabledGates` = `FeatureGates("cluster").Status.FeatureGates` — list of enabled feature gates
    - `kubeVersion` = parse minor version from `ClusterVersion("version").Status.Desired.Version` (e.g., "4.19.0-0.nightly-2026-08-11-225619" → "1.35")
 
-2. **Build expected set**:
-   - **Base APIs**: `servedapis.ForProfileAndVersion(profile, featureSet, kubeVersion)` from vendored openshift/api
-     - Returns `(apis, found bool)` — all OpenShift + Kubernetes APIs for this configuration
+2. **Build expected sets**:
+   - **Base APIs**: `required, optional, found := servedapis.ForProfileAndVersion(profile, featureSet, kubeVersion)` from vendored openshift/api
+     - Returns two separate lists: required APIs and optional APIs
      - If `found == false` (during rebase window when kubeVersion not generated): skip entire test
-   - **Kubernetes overrides**: For each `enabledGate`, look up override entries from `KubeAPIOverridesByFeatureGate` map in openshift/api, filter to those matching `kubeVersion` range, add their GVRs
-   - **Merge**: base APIs + override APIs = expected set
+   - **Kubernetes overrides**: For each `enabledGate`, look up override entries from `KubeAPIOverridesByFeatureGate` map in openshift/api, filter to those matching `kubeVersion` range, add their GVRs to required list
+   - **Convert to sets**: `expectedRequired`, `expectedOptional`
 
 3. **Query actual APIs**: `kubeClient.Discovery().ServerGroupsAndResources()` — filter out subresources (resource names containing `/`)
 
 4. **Bidirectional comparison**:
-   - Every required API (source != optional) not served → **FAIL** with clear message listing missing GVRs
-   - Every served API not in expected (required or optional) → **FAIL** with clear message listing unexpected GVRs
+   - Every required API not served → **FAIL** with clear message listing missing GVRs
+   - Every served API not in `expectedRequired` or `expectedOptional` → **FAIL** with clear message listing unexpected GVRs
    - Optional API not served → **OK** (logged for visibility)
 
 ### B5. Loading API Inventory
@@ -594,16 +606,41 @@ profile := clusterProfileName(exutil.GetControlPlaneTopology(oc))
 featureSet := "Default"  // already checked and skipped if not Default
 kubeVersion := parseKubeVersion(clusterVersion)
 
-baseAPIs, found := servedapis.ForProfileAndVersion(profile, featureSet, kubeVersion)
+required, optional, found := servedapis.ForProfileAndVersion(profile, featureSet, kubeVersion)
 if !found {
     e2eskipper.Skipf("API inventory for profile=%s featureSet=%s kubeVersion=%s not found. This is expected during Kubernetes rebase.", profile, featureSet, kubeVersion)
 }
 
-// Add override APIs for enabled feature gates
-expected := baseAPIs
+// Add override APIs for enabled feature gates (to required list)
 for _, gate := range enabledGates {
     overrides := getOverridesForGate(gate, kubeVersion)
-    expected = append(expected, overrides...)
+    required = append(required, overrides...)
+}
+
+// Convert to GVR sets
+expectedRequired := toGVRSet(required)
+expectedOptional := toGVRSet(optional)
+
+// Query actual APIs
+actual := getActualAPIs(discovery)  // returns sets.Set[schema.GroupVersionResource]
+
+// Compare
+for gvr := range actual {
+    if !expectedRequired.Has(gvr) && !expectedOptional.Has(gvr) {
+        framework.Failf("Unexpected API: %v", gvr)
+    }
+}
+
+for gvr := range expectedRequired {
+    if !actual.Has(gvr) {
+        framework.Failf("Missing required API: %v", gvr)
+    }
+}
+
+for gvr := range expectedOptional {
+    if !actual.Has(gvr) {
+        framework.Logf("Optional API not present (ok): %v", gvr)
+    }
 }
 ```
 
@@ -618,18 +655,19 @@ for _, gate := range enabledGates {
 **Handling missing version data (during rebase):**
 
 When a cluster is running Kubernetes 1.37 but openshift/api hasn't been updated yet to include
-version 1.37 in the generated code, `ForProfileAndVersion()` returns `(nil, false)` and the test skips:
+version 1.37 in the generated code, `ForProfileAndVersion()` returns `(nil, nil, false)` and the test skips:
 
 ```go
 // In test body
-baseAPIs, found := servedapis.ForProfileAndVersion(profile, featureSet, kubeVersion)
+required, optional, found := servedapis.ForProfileAndVersion(profile, featureSet, kubeVersion)
 if !found {
     e2eskipper.Skipf("API inventory for profile=%s featureSet=%s kubeVersion=%s not found. This is expected during Kubernetes rebase. Update openshift/api and regenerate servedapis/zz_generated.served_apis.go", profile, featureSet, kubeVersion)
 }
 
 // Normal test flow - validate everything
-expected := baseAPIs.Union(overrideAPIs)
-// ... continue with discovery and comparison
+// required contains: Kubernetes APIs + core OpenShift CRDs + aggregated servers
+// optional contains: APIs from optional operators (monitoring, OLM, machine-api, etc.)
+// ... add overrides, compare against discovery
 ```
 
 **Why skip the entire test:**
@@ -760,8 +798,15 @@ or kube-apiserver version endpoint), and filters the override map to only entrie
 ## Part C: Edge Cases
 
 ### Optional vs Required Boundary
-- **Required**: All Kubernetes stable APIs, all OpenShift CRDs in `payload-manifests/crds/`, all aggregated API server resources
-- **Optional**: APIs from operators outside the core payload (OLM, monitoring, machine-api, metal3, node-tuning, autoscaling, helm, cloudcredential)
+- **Required**: All Kubernetes APIs, core OpenShift CRDs (in `payload-manifests/crds/`), aggregated API server resources (openshift-apiserver, oauth-apiserver)
+- **Optional**: APIs from optional operators outside the core payload:
+  - monitoring.coreos.com (Prometheus operator)
+  - operators.coreos.com, packages.operators.coreos.com (OLM)
+  - machine.openshift.io, autoscaling.openshift.io, metal3.io (machine management)
+  - tuned.openshift.io, performance.openshift.io (node tuning)
+  - helm.openshift.io, cloudcredential.openshift.io
+
+The distinction is made at generation time - the generator categorizes each API as required or optional based on its source.
 
 ### HyperShift Differences
 - oauth-apiserver may not serve APIs when external OIDC is used → consider marking oauth-apiserver APIs as optional specifically for Hypershift, or detecting OIDC mode
