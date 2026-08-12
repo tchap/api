@@ -523,6 +523,7 @@ Steps:
 1. **Detect cluster state**:
    - `profile` = `exutil.GetControlPlaneTopology(oc)` — `External` → Hypershift, otherwise SelfManaged
    - `featureSet` = `FeatureGates("cluster").Spec.FeatureSet`
+   - **Skip if not Default**: `if featureSet != "Default" { e2eskipper.Skipf("Test only runs on Default feature set, got %s", featureSet) }`
    - `enabledGates` = `FeatureGates("cluster").Status.FeatureGates` — list of enabled feature gates
    - `kubeVersion` = parse minor version from `ClusterVersion("version").Status.Desired.Version` (e.g., "4.19.0-0.nightly-2026-08-11-225619" → "1.35")
 
@@ -729,13 +730,23 @@ or kube-apiserver version endpoint), and filters the override map to only entrie
 ### Discovery API Reliability
 - `ServerGroupsAndResources()` can return partial results if an aggregated API server is restarting — the test should use `discovery.IsGroupDiscoveryFailedError` and retry or fail clearly
 
+### TechPreview/DevPreview Feature Sets
+The test **skips** on TechPreview and DevPreview feature sets:
+- TechPreview CRDs change frequently (5 CRDs are TP-only currently: backups, clustermonitorings, etcdbackups, ingresses, pkis)
+- Would add significant volatility to the test
+- Hard to keep inventory up-to-date with frequent TP changes
+- Test focuses on production/Default configurations which are stable
+- TP functionality is validated through other test suites specific to those features
+
+**Rationale**: The value of this test is catching unexpected API changes in production configurations. TechPreview APIs are expected to change frequently by definition, so validating them here adds noise without much benefit.
+
 ---
 
 ## Verification
 
 1. **openshift/api CI**: `make verify` includes `verify-served-api-inventory` — ensures generated file is in sync
 2. **openshift/api rebase**: After k8s vendor bump → `make update` → review diff in `zz_generated.served_apis.go`
-3. **origin e2e**: Test runs as `[Suite:openshift/conformance/parallel]` on SelfManaged and HyperShift clusters
+3. **origin e2e**: Test runs as `[Suite:openshift/conformance/parallel]` on SelfManaged and HyperShift clusters with Default feature set (skips TechPreview/DevPreview to avoid volatility)
 4. **During development**: After modifying CRDs or feature gates → `make update` in openshift/api → review diff
 5. **Version skew handled**: Test queries cluster version and calls `KubernetesAPIs(version)`, eliminating test-binary vs cluster-version mismatch
 
