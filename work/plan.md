@@ -423,16 +423,16 @@ Standalone binary following the pattern of `write-available-featuresets`. Takes 
 
 3. **`aggregated_apis.go`** — hardcoded lists for openshift-apiserver (9 groups, ~35 resources) and oauth-apiserver (2 groups, ~10 resources). Based on the exploration findings. Changes very rarely.
 
-4. **`optional_apis.go`** — APIs from optional operators marked `Source: optional`:
-   - monitoring.coreos.com (alertmanagers, prometheuses, servicemonitors, etc.)
-   - operators.coreos.com (clusterserviceversions, subscriptions, etc.)
-   - packages.operators.coreos.com (packagemanifests)
-   - machine.openshift.io (machines, machinesets, machinehealthchecks)
-   - autoscaling.openshift.io (clusterautoscalers, machineautoscalers)
-   - metal3.io (baremetalhosts, provisionings, etc.)
-   - tuned.openshift.io, performance.openshift.io
-   - helm.openshift.io
-   - cloudcredential.openshift.io
+4. **`optional_apis.go`** — APIs from optional operators (returned in the optional list, not required):
+   - monitoring.coreos.com (alertmanagers, prometheuses, servicemonitors, etc.) - `Source: SourceOpenShiftCRD`
+   - operators.coreos.com (clusterserviceversions, subscriptions, etc.) - `Source: SourceOpenShiftCRD`
+   - packages.operators.coreos.com (packagemanifests) - `Source: SourceOpenShiftCRD`
+   - machine.openshift.io (machines, machinesets, machinehealthchecks) - `Source: SourceOpenShiftCRD`
+   - autoscaling.openshift.io (clusterautoscalers, machineautoscalers) - `Source: SourceOpenShiftCRD`
+   - metal3.io (baremetalhosts, provisionings, etc.) - `Source: SourceOpenShiftCRD`
+   - tuned.openshift.io, performance.openshift.io - `Source: SourceOpenShiftCRD`
+   - helm.openshift.io - `Source: SourceOpenShiftCRD`
+   - cloudcredential.openshift.io - `Source: SourceOpenShiftCRD`
 
 ### A3. CRD Variant Detection
 
