@@ -10,6 +10,75 @@ No such test or tooling exists today. The closest patterns are:
 - `origin/test/extended/etcd/etcd_storage_path.go` — static map of persisted resources with bidirectional validation against discovery
 - `origin/test/extended/cli/explain.go` — static lists of expected API resources
 
+## API Versioning and Feature Gates — Background
+
+### API Versions (Stability Contract)
+
+Kubernetes API versions indicate stability, not just iteration:
+
+- **`v1`** — Stable, backward compatible, **always enabled**
+- **`v1beta1`** — Beta quality, may change, **enabled by default** in modern Kubernetes
+- **`v1alpha1`** — Alpha/experimental, **always behind a feature gate, disabled by default**
+
+### Feature Gates (Functionality Control)
+
+Feature gates can control:
+- **Entire new APIs** (always for alpha APIs, sometimes for beta)
+- **Specific fields** within an existing API (e.g., new field in `Pod.spec`)
+- **Behavior changes** (e.g., how scheduling works)
+
+### API Graduation and Deprecation
+
+When an API graduates from `v1beta1` → `v1`:
+
+1. **At v1 GA release**: Both versions are served (v1 becomes storage version, v1beta1 deprecated but still works)
+2. **Deprecation window**: v1beta1 remains served for **9 months OR 3 releases** (whichever is longer)
+3. **After window**: v1beta1 removed from serving, only v1 available
+
+During the transition, the API server handles version conversion:
+- **Reads**: Fetch from etcd (stored as v1) → convert to requested version → return
+- **Writes**: Accept in any served version → convert to storage version (v1) → write to etcd
+
+### Storage vs Served vs Scheme
+
+**Storage version**: Which version is written to etcd (only ONE per resource)
+**Served versions**: Which versions clients can use via API (can be MULTIPLE during deprecation)
+**Scheme**: Registers types at ALL historical versions for serialization/conversion (even removed ones)
+
+**Key insight**: The scheme is for serialization backward compatibility, not "what's served". 
+After `apps/v1beta1` Deployment graduates to `apps/v1` and is removed from serving:
+- Scheme still has `apps/v1beta1` Deployment types (for conversion)
+- API server rejects `apps/v1beta1` API calls (not in served list)
+
+### What DefaultAPIResourceConfigSource() Tells Us
+
+`k8s.io/kubernetes/pkg/controlplane.DefaultAPIResourceConfigSource()` returns the list of 
+GroupVersions **enabled by default** in the main kube-apiserver:
+
+**Enabled**:
+- All `v1` APIs (stable, always on)
+- Beta APIs in deprecation window (still served)
+- Beta APIs for new groups (no v1 yet)
+
+**Disabled**:
+- Superseded betas (graduated to v1, removal window expired)
+- Alpha APIs (always disabled by default)
+
+**Note**: There are three different `DefaultAPIResourceConfigSource()` functions:
+1. **`k8s.io/kubernetes/pkg/controlplane`** — Main kube-apiserver, **this is the one we need**
+2. `k8s.io/apiextensions-apiserver/pkg/apiserver` — Only `apiextensions.k8s.io` APIs (the CRD resource itself)
+3. `k8s.io/kube-aggregator/pkg/apiserver` — Only `apiregistration.k8s.io` APIs (the APIService resource)
+
+### OpenShift Feature Gates and Kubernetes APIs
+
+OpenShift can enable **additional Kubernetes feature gates** beyond the defaults. When it does,
+those gates may enable alpha/beta APIs that aren't in `DefaultAPIResourceConfigSource()`.
+
+**Example**: OpenShift enables the `MutatingAdmissionPolicy` feature gate:
+- Kubernetes default: gate disabled → `admissionregistration.k8s.io/v1beta1` MutatingAdmissionPolicy **not served**
+- OpenShift: enables the gate → API **is served**
+- This is what the override map captures: "when this OpenShift feature gate is on, these extra Kubernetes APIs become available"
+
 ## Test Flow
 
 The e2e test in origin builds the expected API set from three sources, queries the
@@ -112,8 +181,9 @@ derives the expected list from the vendored Kubernetes code, once per supported 
 
 ### Limitation: scheme is unreliable for Kubernetes-disabled beta GVs
 
-The scheme registers types at their historical GroupVersions for serialization/conversion
-backward compatibility, not just for serving. For example,
+As explained in the "API Versioning and Feature Gates" section above, the scheme registers
+types at their historical GroupVersions for serialization/conversion backward compatibility
+(to handle the storage version vs served versions distinction). For example,
 `admissionregistration.k8s.io/v1beta1` in the scheme includes 6 types, but only 2
 (`MutatingAdmissionPolicy`, `MutatingAdmissionPolicyBinding`) are actually served —
 the other 4 graduated to v1 long ago but remain registered so old objects can still
@@ -137,13 +207,16 @@ needs explicit Kinds, because those GVs are Kubernetes-disabled and have graduat
 
 ### Kubernetes API overrides from OpenShift feature gates
 
-OpenShift enables certain alpha/beta Kubernetes APIs when specific OpenShift feature gates
-are active (e.g., `MutatingAdmissionPolicy` gate enables `MutatingAdmissionPolicy` and
-`MutatingAdmissionPolicyBinding` at `admissionregistration.k8s.io/v1beta1`).
+As explained in the "API Versioning and Feature Gates" section, OpenShift can enable
+additional Kubernetes feature gates beyond defaults. OpenShift enables certain alpha/beta
+Kubernetes APIs when specific OpenShift feature gates are active (e.g., `MutatingAdmissionPolicy`
+gate enables `MutatingAdmissionPolicy` and `MutatingAdmissionPolicyBinding` at
+`admissionregistration.k8s.io/v1beta1`).
 
-These APIs are NOT in `DefaultAPIResourceConfigSource()` — they're added to the kube-apiserver's
-`--runtime-config` by the cluster-kube-apiserver-operator. And because the scheme is
-unreliable for alpha/beta GVs (see above), the override map must list **explicit Kinds**,
+These APIs are NOT in `DefaultAPIResourceConfigSource()` — they're disabled by default
+in Kubernetes but added to the kube-apiserver's `--runtime-config` by the
+cluster-kube-apiserver-operator. And because the scheme is unreliable for these
+Kubernetes-disabled GVs (see above), the override map must list **explicit Kinds**,
 not just GroupVersions.
 
 The mapping of OpenShift feature gate → additional Kubernetes API resources lives in
@@ -225,7 +298,47 @@ Standalone binary following the pattern of `write-available-featuresets`. Takes 
        - Filters and converts to GVRs
        - Outputs `kube-apis-{version}.yaml`
 
-2. **`kube_api_derivation.go`** — scheme-based Kubernetes API derivation (see code example in "Kubernetes API overrides" section above). Runs once per supported kube version.
+2. **`kube_api_derivation.go`** — scheme-based Kubernetes API derivation. Runs once per supported kube version:
+   ```go
+   import (
+       clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+       "k8s.io/apimachinery/pkg/api/meta"
+       "k8s.io/kubernetes/pkg/controlplane"  // IMPORTANT: Use this one, not apiextensions or aggregator
+   )
+   
+   func deriveKubernetesAPIs(kubeVersion string) []ServedAPIEntry {
+       // Get enabled GroupVersions from main kube-apiserver config
+       resourceConfig := controlplane.DefaultAPIResourceConfigSource()
+       
+       result := []ServedAPIEntry{}
+       for gv := range resourceConfig.EnabledVersions() {
+           for kind := range clientgoscheme.Scheme.KnownTypes(gv) {
+               if shouldSkipType(kind) { continue }
+               
+               plural, _ := meta.UnsafeGuessKindToResource(gv.WithKind(kind))
+               result = append(result, ServedAPIEntry{
+                   Group:    plural.Group,
+                   Version:  plural.Version,
+                   Resource: plural.Resource,
+                   Kind:     kind,
+                   Scope:    inferScope(kind),  // from scheme or defaults
+                   Source:   SourceCoreKube,
+               })
+           }
+       }
+       return result
+   }
+   
+   func shouldSkipType(kind string) bool {
+       if strings.HasSuffix(kind, "List") { return true }
+       if strings.HasSuffix(kind, "Options") { return true }
+       return subresourceOnlyTypes.Has(kind)
+   }
+   
+   var subresourceOnlyTypes = sets.New("Binding", "Eviction", "Scale",
+       "TokenRequest", "NodeProxyOptions", "ServiceProxyOptions",
+       "PodProxyOptions", "SerializedReference", "RangeAllocation")
+   ```
 
 3. **`aggregated_apis.go`** — hardcoded lists for openshift-apiserver (9 groups, ~35 resources) and oauth-apiserver (2 groups, ~10 resources). Based on the exploration findings. Changes very rarely.
 
