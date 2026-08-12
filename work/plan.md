@@ -269,6 +269,35 @@ cluster-kube-apiserver-operator. And because the scheme is unreliable for these
 Kubernetes-disabled GVs (see above), the override map must list **explicit Kinds**,
 not just GroupVersions.
 
+**Why explicit Kinds are required** — concrete example:
+
+When the `MutatingAdmissionPolicy` feature gate is enabled, it enables
+`admissionregistration.k8s.io/v1beta1`. If we tried to derive types from the scheme:
+
+```go
+// Without explicit Kinds - deriving from scheme
+gv := schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"}
+for kind := range clientgoscheme.Scheme.KnownTypes(gv) {
+    // Scheme returns 6 types:
+    // ✓ MutatingAdmissionPolicy (actually served at v1beta1)
+    // ✓ MutatingAdmissionPolicyBinding (actually served at v1beta1)
+    // ✗ ValidatingWebhookConfiguration (graduated to v1, NOT served at v1beta1)
+    // ✗ MutatingWebhookConfiguration (graduated to v1, NOT served at v1beta1)
+    // ✗ ValidatingAdmissionPolicy (graduated to v1, NOT served at v1beta1)
+    // ✗ ValidatingAdmissionPolicyBinding (graduated to v1, NOT served at v1beta1)
+}
+```
+
+**Result without explicit Kinds**: Test would expect all 6 types at v1beta1, but the cluster
+only serves 2 at v1beta1 (the other 4 are at v1). Test fails with "missing APIs":
+- `admissionregistration.k8s.io/v1beta1 ValidatingWebhookConfiguration`
+- `admissionregistration.k8s.io/v1beta1 MutatingWebhookConfiguration`
+- `admissionregistration.k8s.io/v1beta1 ValidatingAdmissionPolicy`
+- `admissionregistration.k8s.io/v1beta1 ValidatingAdmissionPolicyBinding`
+
+**Result with explicit Kinds**: Override map says "only these 2 Kinds", test expects only what's
+actually served, test passes.
+
 The mapping of OpenShift feature gate → additional Kubernetes API resources lives in
 openshift/api, co-located with the feature gate definitions. This could be an extension
 of the feature gate builder pattern in `features/features.go` or a separate registry
