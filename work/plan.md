@@ -19,7 +19,8 @@ cluster, and compares:
  1. Detect cluster state
     ├── profile      ← Infrastructure.Status.ControlPlaneTopology (Hypershift vs SelfManaged)
     ├── featureSet   ← FeatureGate("cluster").Spec.FeatureSet (Default, TechPreview, ...)
-    └── enabledGates ← FeatureGate("cluster").Status.FeatureGates (list of active gates)
+    ├── enabledGates ← FeatureGate("cluster").Status.FeatureGates (list of active gates)
+    └── kubeVersion  ← ClusterVersion.Status.Desired.Version → parse kube minor (e.g., "1.35")
 
  2. Build expected API set
     │
@@ -29,14 +30,14 @@ cluster, and compares:
     │  → Aggregated API server resources (openshift-apiserver, oauth-apiserver)
     │  → Optional operator APIs (monitoring, OLM, machine-api, etc.)
     │
-    ├─ Kubernetes stable APIs (derived from vendored k8s code, no manual list)
-    │  DefaultAPIResourceConfigSource() → enabled GroupVersions
-    │  → for each GV: clientgoscheme.Scheme.KnownTypes(gv)
-    │  → filter (remove List, Options, subresource-only types)
-    │  → UnsafeGuessKindToResource() → GVRs
+    ├─ Kubernetes APIs (from pre-generated per-version static list in openshift/api)
+    │  Load kube-apis-{kubeVersion}.yaml from vendored openshift/api
+    │  → generated during rebase via scheme + DefaultAPIResourceConfigSource
+    │  → versioned to handle skew between test binary and cluster
     │
     └─ Kubernetes overrides (OpenShift feature gates that enable extra k8s APIs)
        for each enabledGate: look up override entries from map in openshift/api
+       filter to KubeVersionRange matching kubeVersion
        entries have explicit Kinds (not derived from scheme — see limitation below)
        e.g. MutatingAdmissionPolicy → MutatingAdmissionPolicy, MutatingAdmissionPolicyBinding
             at admissionregistration.k8s.io/v1beta1
@@ -60,40 +61,54 @@ openshift/api                              origin
 │ payload-command/cmd/         │     │ test/extended/apiserver/    │
 │   write-served-api-inventory │     │   served_api_inventory.go   │
 │                              │     │                             │
-│ payload-command/servedapis/  │     │ Builds expected set from:   │
-│   generator.go               │────>│  · vendored servedapis pkg  │
-│   aggregated_apis.go         │     │  · clientgoscheme.Scheme    │
-│   optional_apis.go           │     │  · DefaultAPIResourceConfig │
-│                              │     │  · kube API override map    │
-│ features/                    │     │                             │
-│   kube_api_overrides.go      │────>│ Queries cluster discovery,  │
-│                              │     │ compares bidirectionally    │
-│ servedapis/                  │     └─────────────────────────────┘
+│ payload-command/servedapis/  │     │ Detects cluster version,    │
+│   generator.go               │────>│ loads matching static lists:│
+│   aggregated_apis.go         │     │  · servedapis pkg (OpenShift│
+│   optional_apis.go           │     │    CRDs, aggregated servers)│
+│   kube_api_derivation.go     │     │  · kube-apis-{ver}.yaml     │
+│   (scheme + config → GVRs)   │     │  · kube API override map    │
+│                              │     │                             │
+│ features/                    │     │ Queries cluster discovery,  │
+│   kube_api_overrides.go      │────>│ compares bidirectionally    │
+│                              │     └─────────────────────────────┘
+│ servedapis/                  │
 │   types.go                   │
 │   zz_generated.served_apis.go│  ← generated, vendored into origin
 │                              │
 │ payload-manifests/served-apis│
-│   servedAPIs-*.yaml          │  ← generated, human-readable
+│   servedAPIs-*.yaml          │  ← OpenShift APIs (CRDs, etc.)
+│   kube-apis-1.35.yaml        │  ← Kubernetes APIs per version
+│   kube-apis-1.36.yaml        │  ← (scheme-derived during rebase)
 └──────────────────────────────┘
 ```
 
-### Key insight: no manual Kubernetes API list
+### Key insight: Kubernetes APIs generated per-version, not manually maintained
 
 Instead of maintaining a `kube_apis.go` with ~100+ Kubernetes resource entries, the
-Kubernetes API inventory is derived programmatically at test time in origin using:
+Kubernetes API inventory is **generated during rebase** in openshift/api using:
 
-1. **`clientgoscheme.Scheme`** — registers all Kubernetes API types. Updated automatically
-   when `k8s.io/client-go` is vendored during rebases.
-2. **`DefaultAPIResourceConfigSource()`** from `k8s.io/kubernetes/pkg/controlplane/instance.go` —
-   lists which GroupVersions are enabled/disabled by default. Also vendored.
-3. **`meta.UnsafeGuessKindToResource()`** — converts Kind → plural resource name.
-   Works correctly for all standard Kubernetes types.
+1. **`clientgoscheme.Scheme`** — registers all Kubernetes API types from the vendored
+   `k8s.io/api` (openshift/api needs to vendor all scheme-registered packages for this)
+2. **`DefaultAPIResourceConfigSource()`** from vendored `k8s.io/kubernetes/pkg/controlplane/instance.go` —
+   lists which GroupVersions are enabled/disabled by default
+3. **`meta.UnsafeGuessKindToResource()`** — converts Kind → plural resource name
 4. **Type filtering** — remove List types (suffix "List"), Options types (suffix "Options"),
-   and a small blocklist of subresource-only types (~5 entries: Binding, Eviction, Scale,
-   TokenRequest, etc.).
+   and a small blocklist of subresource-only types (~10 entries: Binding, Eviction, Scale,
+   TokenRequest, NodeProxyOptions, ServiceProxyOptions, PodProxyOptions, SerializedReference, RangeAllocation)
 
-This means **no manual maintenance for Kubernetes APIs during rebases**. The expected
-list is always correct because it's derived from the same vendored code the cluster uses.
+The generator in openshift/api runs this derivation once per supported Kubernetes version
+and outputs **versioned static files**:
+- `payload-manifests/served-apis/kube-apis-1.35.yaml`
+- `payload-manifests/served-apis/kube-apis-1.36.yaml`
+- etc.
+
+**Why per-version files:** The test runs against a live cluster whose Kubernetes version
+may not match what's vendored in the origin test binary (during rebase windows, in dev
+environments). The test queries the cluster's version and loads the matching file, making
+it robust to version skew.
+
+This means **no manual maintenance for Kubernetes APIs during rebases**. The generator
+derives the expected list from the vendored Kubernetes code, once per supported version.
 
 ### Limitation: scheme is unreliable for Kubernetes-disabled beta GVs
 
@@ -144,12 +159,12 @@ Currently this data is maintained separately in
 - It's versioned alongside the feature gates themselves
 
 At test time, the e2e test reads the cluster's enabled feature gates from
-`FeatureGate("cluster").Status.FeatureGates`, looks up override GVs for each
-enabled gate, and adds them to the expected Kubernetes API set.
+`FeatureGate("cluster").Status.FeatureGates`, queries the cluster's Kubernetes version,
+filters the override map to entries matching that version, and adds them to the expected set.
 
-Note: openshift/api only partially vendors `k8s.io/api` (missing resource.k8s.io,
-discovery.k8s.io/v1, etc.), so the scheme-based derivation runs in origin which has
-the complete vendor tree.
+Note: openshift/api needs to vendor the complete `k8s.io/api` (not just the partial set
+it currently has) to run the scheme-based Kubernetes API derivation during generation.
+The generator runs at openshift/api build time (during rebase), not at test runtime.
 
 ---
 
@@ -195,18 +210,26 @@ Standalone binary following the pattern of `write-available-featuresets`. Takes 
 **Generator logic** in `payload-command/servedapis/`:
 
 1. **`generator.go`** — main orchestration:
-   - Reads CRD manifests from `payload-manifests/crds/`
-   - Parses filename suffixes to determine (ClusterProfile, FeatureSet) applicability
-   - Extracts served GVRs from each CRD's `spec.versions[].served`, `spec.group`, `spec.names.plural/kind`, `spec.scope`
-   - Merges with hardcoded aggregated API server entries
-   - Merges with optional API entries
-   - Outputs one YAML file per (ClusterProfile, FeatureSet) combination
-   - Outputs `zz_generated.served_apis.go`
-   - **Does NOT include Kubernetes built-in APIs** — those are derived at test time in origin
+   - **OpenShift APIs** (per ClusterProfile, FeatureSet):
+     - Reads CRD manifests from `payload-manifests/crds/`
+     - Parses filename suffixes and `release.openshift.io/feature-set` annotations
+     - Extracts served GVRs from each CRD's `spec.versions[].served`, `spec.group`, `spec.names.plural/kind`, `spec.scope`
+     - Merges with hardcoded aggregated API server entries
+     - Merges with optional API entries
+     - Outputs `servedAPIs-{profile}-{featureSet}.yaml` files
+     - Outputs `zz_generated.served_apis.go`
+   
+   - **Kubernetes APIs** (per supported kube version):
+     - For each supported kube minor version (e.g., 1.35, 1.36):
+       - Derives from vendored scheme + `DefaultAPIResourceConfigSource()`
+       - Filters and converts to GVRs
+       - Outputs `kube-apis-{version}.yaml`
 
-2. **`aggregated_apis.go`** — hardcoded lists for openshift-apiserver (9 groups, ~35 resources) and oauth-apiserver (2 groups, ~10 resources). Based on the exploration findings. Changes very rarely.
+2. **`kube_api_derivation.go`** — scheme-based Kubernetes API derivation (see code example in "Kubernetes API overrides" section above). Runs once per supported kube version.
 
-3. **`optional_apis.go`** — APIs from optional operators marked `Source: optional`:
+3. **`aggregated_apis.go`** — hardcoded lists for openshift-apiserver (9 groups, ~35 resources) and oauth-apiserver (2 groups, ~10 resources). Based on the exploration findings. Changes very rarely.
+
+4. **`optional_apis.go`** — APIs from optional operators marked `Source: optional`:
    - monitoring.coreos.com (alertmanagers, prometheuses, servicemonitors, etc.)
    - operators.coreos.com (clusterserviceversions, subscriptions, etc.)
    - packages.operators.coreos.com (packagemanifests)
@@ -246,6 +269,8 @@ The `include.release.openshift.io/*` annotations determine profile availability
 ### A4. Output Files
 
 **YAML** (in `payload-manifests/served-apis/`):
+
+**OpenShift APIs** (per ClusterProfile × FeatureSet):
 - `servedAPIs-SelfManagedHA-Default.yaml`
 - `servedAPIs-SelfManagedHA-TechPreviewNoUpgrade.yaml`
 - `servedAPIs-SelfManagedHA-DevPreviewNoUpgrade.yaml`
@@ -255,9 +280,14 @@ The `include.release.openshift.io/*` annotations determine profile availability
 - `servedAPIs-Hypershift-DevPreviewNoUpgrade.yaml`
 - `servedAPIs-Hypershift-OKD.yaml`
 
+**Kubernetes APIs** (per supported Kubernetes version):
+- `kube-apis-1.35.yaml`
+- `kube-apis-1.36.yaml`
+- `kube-apis-1.37.yaml` (added as new versions are supported)
+
 Each YAML file is a sorted list of `ServedAPIEntry` records. Sorted by (group, version, resource) for stable diffs.
 
-**Go** (`servedapis/zz_generated.served_apis.go`): Same data as Go literals with a lookup function.
+**Go** (`servedapis/zz_generated.served_apis.go`): OpenShift API data as Go literals with a lookup function. Kubernetes API files remain as YAML (loaded/embedded at test time).
 
 ### A5. Build System
 
@@ -299,71 +329,70 @@ Steps:
    - `profile` = `exutil.GetControlPlaneTopology(oc)` — `External` → Hypershift, otherwise SelfManaged
    - `featureSet` = `FeatureGates("cluster").Spec.FeatureSet`
    - `enabledGates` = `FeatureGates("cluster").Status.FeatureGates` — list of enabled feature gates
-2. **Build OpenShift expected set**: `servedapis.ForProfile(profile, featureSet)` (from vendored openshift/api) → CRDs + aggregated API server resources + optional
-3. **Build Kubernetes stable expected set**: `DefaultAPIResourceConfigSource()` → enabled GVs → scheme types → filter → `UnsafeGuessKindToResource()` (see B5)
-4. **Apply Kubernetes overrides**: for each `enabledGate`, look up additional Kubernetes GVs from the override map in openshift/api → derive resources from scheme the same way
-5. **Merge** steps 2 + 3 + 4 into one expected set
-6. **Query actual APIs**: `kubeClient.Discovery().ServerGroupsAndResources()` — filter out subresources (resource names containing `/`)
-7. **Bidirectional comparison**:
+   - `kubeVersion` = parse minor version from `ClusterVersion("version").Status.Desired.Version` (e.g., "4.19.0-0.nightly-2026-08-11-225619" → "1.35")
+
+2. **Build expected set**:
+   - **OpenShift APIs**: `servedapis.ForProfile(profile, featureSet)` from vendored openshift/api → CRDs + aggregated servers + optional
+   - **Kubernetes APIs**: Load `kube-apis-{kubeVersion}.yaml` from vendored openshift/api (embedded or filesystem)
+   - **Kubernetes overrides**: For each `enabledGate`, look up override entries from `KubeAPIOverridesByFeatureGate` map in openshift/api, filter to those matching `kubeVersion` range, add their GVRs
+   - **Merge** all three into one expected set
+
+3. **Query actual APIs**: `kubeClient.Discovery().ServerGroupsAndResources()` — filter out subresources (resource names containing `/`)
+
+4. **Bidirectional comparison**:
    - Every required API (source != optional) not served → **FAIL** with clear message listing missing GVRs
    - Every served API not in expected (required or optional) → **FAIL** with clear message listing unexpected GVRs
    - Optional API not served → **OK** (logged for visibility)
 
-### B5. Deriving Kubernetes APIs from the Scheme
+### B5. Loading Kubernetes APIs
 
-The e2e test derives the expected Kubernetes API resources programmatically:
+The test loads per-version Kubernetes API lists generated during openshift/api rebase:
 
 ```go
 import (
-    clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-    "k8s.io/apimachinery/pkg/api/meta"
-    "k8s.io/kubernetes/pkg/controlplane"
+    _ "embed"
+    "gopkg.in/yaml.v2"
 )
 
-func expectedKubeResources() sets.Set[schema.GroupVersionResource] {
-    // Get enabled GroupVersions — includes both stable (v1) and beta GVs
-    // of new groups whose feature gate is beta-enabled-by-default.
-    // Superseded beta GVs (where v1 exists) are in the disabled list,
-    // so they won't appear here — no graduated-type problem.
-    resourceConfig := controlplane.DefaultAPIResourceConfigSource()
+//go:embed kube-apis-1.35.yaml
+var kubeAPIs135 []byte
 
-    result := sets.New[schema.GroupVersionResource]()
-    for gv := range resourceConfig.EnabledVersions() {
-        for kind := range clientgoscheme.Scheme.KnownTypes(gv) {
-            if shouldSkipType(kind) {
-                continue
-            }
-            plural, _ := meta.UnsafeGuessKindToResource(gv.WithKind(kind))
-            result.Insert(plural)
-        }
+//go:embed kube-apis-1.36.yaml
+var kubeAPIs136 []byte
+
+func loadKubernetesAPIs(kubeVersion string) ([]ServedAPIEntry, error) {
+    var data []byte
+    switch kubeVersion {
+    case "1.35":
+        data = kubeAPIs135
+    case "1.36":
+        data = kubeAPIs136
+    default:
+        return nil, fmt.Errorf("unsupported kube version %s", kubeVersion)
     }
-    return result
+    
+    var apis []ServedAPIEntry
+    if err := yaml.Unmarshal(data, &apis); err != nil {
+        return nil, err
+    }
+    return apis, nil
 }
 
-// shouldSkipType filters out types that aren't top-level API resources
-func shouldSkipType(kind string) bool {
-    if strings.HasSuffix(kind, "List") { return true }
-    if strings.HasSuffix(kind, "Options") { return true }
-    return subresourceOnlyTypes.Has(kind)
+func parseKubeVersion(clusterVersion string) string {
+    // ClusterVersion.Status.Desired.Version format: "4.19.0-0.nightly-2026-08-11-225619"
+    // Contains embedded kube version somewhere in metadata/tags
+    // Actual implementation will query kube-apiserver version or parse from
+    // ClusterVersion payload metadata
+    return "1.35"  // placeholder
 }
-
-var subresourceOnlyTypes = sets.New("Binding", "Eviction", "Scale",
-    "TokenRequest", "NodeProxyOptions", "ServiceProxyOptions",
-    "PodProxyOptions", "SerializedReference", "RangeAllocation")
 ```
 
-**Why this works for both stable and beta GVs:**
-- `DefaultAPIResourceConfigSource()` enables stable GVs and beta GVs of new API groups
-  (where the Kubernetes feature gate is beta-enabled-by-default)
-- Superseded beta GVs (where types graduated to v1) are in the disabled list — they're
-  never in the enabled set, so the graduated-type problem doesn't arise
-- The scheme is reliable for all enabled GVs because enabled betas are always for new
-  groups without a v1 to graduate types away from
-- `UnsafeGuessKindToResource()` handles standard Kubernetes pluralization correctly
-- The `subresourceOnlyTypes` blocklist is ~10 entries and extremely stable across releases
-
-**Reference**: PR openshift/cluster-kube-apiserver-operator#2179 uses the same
-`clientgoscheme.Scheme` approach for staleness detection.
+**Why version-specific files:**
+- Test binary may have different vendored k8s.io dependencies than the live cluster
+- Cluster may be n-1 or n+1 from what the test binary was built against
+- Static lists are generated once per supported kube version during openshift/api rebase
+- Test runtime queries cluster version and loads matching file — no scheme needed
+- Eliminates version skew problems entirely
 
 ### B3. Helpers to Reuse
 
@@ -417,31 +446,24 @@ new CRDs during the time between the openshift/api merge and the origin vendor b
 
 ## Kubernetes Rebase
 
-During a Kubernetes rebase, the vendored `k8s.io/client-go` and `k8s.io/kubernetes`
-are updated. This changes the scheme and `DefaultAPIResourceConfigSource()`, which
-changes the derived expected Kubernetes API set.
+During a Kubernetes rebase in openshift/api:
 
-**The test will fail** if the new Kubernetes version adds, removes, or moves APIs.
-This is intentional — the failure surfaces exactly which APIs changed and forces
-explicit acknowledgment.
+1. **Update vendored k8s.io dependencies** in openshift/api (update `k8s.io/api`, `k8s.io/client-go`, `k8s.io/kubernetes`)
+2. **Regenerate Kubernetes API static files**: Run the generator (via `make update`) to produce updated `kube-apis-{version}.yaml` files
+3. **Review the diff** in `payload-manifests/served-apis/kube-apis-*.yaml` — shows exactly which APIs changed
+4. **Update override map** if needed (see below)
+5. **Vendor bump in origin**: When origin vendors the updated openshift/api, the test automatically picks up the new Kubernetes API list
 
-### What changes automatically (no action needed)
-- New resources added to existing stable GroupVersions (e.g., new Kind in `apps/v1`)
-  → the scheme picks them up
-- Resources removed from the scheme → automatically excluded
-- GroupVersions moving from disabled-by-default to enabled-by-default (or vice versa)
-  → `DefaultAPIResourceConfigSource()` reflects this
+**What changes automatically**:
+- New resources added to existing stable GroupVersions → scheme-based generation picks them up
+- Resources removed from Kubernetes → absent from generated file
+- GroupVersions moving from disabled to enabled (or vice versa) → reflected in `DefaultAPIResourceConfigSource()`
+- The generated `kube-apis-{version}.yaml` files capture the complete state for that kube version
 
-### What needs manual attention
-- **Kubernetes API override map**: If the rebase changes which alpha/beta APIs exist
-  for a feature-gate-enabled GroupVersion (e.g., `v1alpha1` → `v1beta1` for
-  MutatingAdmissionPolicy), update the override mapping in `features/kube_api_overrides.go`.
-  This is the same update currently done in `cluster-kube-apiserver-operator`'s
-  `defaultGroupVersionsByFeatureGate`.
-- **Subresource-only blocklist**: If Kubernetes adds a new type that is only a
-  subresource (rare), add it to `subresourceOnlyTypes`.
-- **OpenShift CRD changes**: If the rebase changes OpenShift CRDs, run `make update`
-  in openshift/api to regenerate the inventory.
+**What needs manual attention**:
+- **Kubernetes API override map**: If the rebase changes which alpha/beta APIs exist for a feature-gate-enabled GroupVersion (e.g., `v1alpha1` → `v1beta1` for MutatingAdmissionPolicy), update `features/kube_api_overrides.go`
+- **New kube version**: Add a new `kube-apis-{newVersion}.yaml` file to the generation logic
+- **OpenShift CRD changes**: If the rebase changes OpenShift CRDs, `make update` regenerates both kube and OpenShift inventories
 
 ### Per-version override map
 
@@ -477,9 +499,10 @@ backward compatibility even after graduation. `admissionregistration.k8s.io/v1be
 has 6 types in the scheme, but only 2 are actually served — the other 4 graduated
 to v1. We can't derive resources from the scheme for alpha/beta GVs.
 
-At test time, Kinds are converted to GVRs via `UnsafeGuessKindToResource()`. The kube
-version is available from `componentbaseversion.DefaultKubeBinaryVersion` (vendored),
-and the test filters the override map to only entries matching the current kube version.
+At test time, Kinds are converted to GVRs via `UnsafeGuessKindToResource()`. The test
+queries the cluster's actual Kubernetes version (from `ClusterVersion.Status.Desired.Version`
+or kube-apiserver version endpoint), and filters the override map to only entries whose
+`KubeVersionRange` matches that version.
 
 ---
 
@@ -500,26 +523,43 @@ and the test filters the override map to only entries matching the current kube 
 
 ## Verification
 
-1. **openshift/api CI**: `make verify` includes `verify-served-api-inventory`
-2. **origin e2e**: Test runs as `[Suite:openshift/conformance/parallel]` on SelfManaged and HyperShift clusters
-3. **During development**: After modifying CRDs or feature gates → `make update` → review diff
-4. **During rebase**: Test failures surface Kubernetes API changes; update override map + blocklist as needed
+1. **openshift/api CI**: `make verify` includes `verify-served-api-inventory` — ensures generated files are in sync
+2. **openshift/api rebase**: After k8s vendor bump → `make update` → review diff in `kube-apis-*.yaml` files
+3. **origin e2e**: Test runs as `[Suite:openshift/conformance/parallel]` on SelfManaged and HyperShift clusters
+4. **During development**: After modifying CRDs or feature gates → `make update` in openshift/api → review diff
+5. **Version skew handled**: Test queries cluster version and loads matching static file, eliminating test-binary vs cluster-version mismatch
 
 ---
 
 ## Implementation Order
 
-1. Create `servedapis/types.go` in openshift/api
-2. Create generator package `payload-command/servedapis/` with generator.go, aggregated_apis.go, optional_apis.go
-3. Create `payload-command/cmd/write-served-api-inventory/main.go`
-4. Create `hack/update-served-api-inventory.sh` and `hack/verify-served-api-inventory.sh`
-5. Wire into Makefile
-6. Run generator → produces `payload-manifests/served-apis/*.yaml` and `servedapis/zz_generated.served_apis.go`
-7. Vendor updated openshift/api into origin
-8. Create `test/extended/apiserver/served_api_inventory.go` in origin, including the
-   scheme-based Kubernetes API derivation using `clientgoscheme.Scheme` +
-   `DefaultAPIResourceConfigSource()` + `UnsafeGuessKindToResource()`
-9. Test against a real cluster
+### In openshift/api:
+
+1. Create `servedapis/types.go`
+2. Create generator package `payload-command/servedapis/`:
+   - `generator.go` — main orchestration for OpenShift APIs
+   - `kube_api_derivation.go` — scheme-based Kubernetes API derivation per version
+   - `aggregated_apis.go` — hardcoded aggregated API server lists
+   - `optional_apis.go` — optional operator API lists
+3. Create `features/kube_api_overrides.go` — feature-gate → Kubernetes API mapping with version ranges
+4. Create `payload-command/cmd/write-served-api-inventory/main.go`
+5. Create `hack/update-served-api-inventory.sh` and `hack/verify-served-api-inventory.sh`
+6. Wire into Makefile: `update-served-api-inventory`, `verify-served-api-inventory`, `build`
+7. Run generator → produces:
+   - `payload-manifests/served-apis/servedAPIs-*.yaml` (OpenShift APIs per profile/featureSet)
+   - `payload-manifests/served-apis/kube-apis-*.yaml` (Kubernetes APIs per version)
+   - `servedapis/zz_generated.served_apis.go`
+
+### In origin:
+
+8. Vendor updated openshift/api
+9. Create `test/extended/apiserver/served_api_inventory.go`:
+   - Embed `kube-apis-*.yaml` files (or load from vendored openshift/api)
+   - Detect cluster profile, feature set, kube version
+   - Load expected sets from three sources
+   - Query discovery
+   - Bidirectional compare
+10. Test against real cluster
 
 ---
 
