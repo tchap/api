@@ -151,22 +151,11 @@ openshift/api                              origin
 └──────────────────────────────┘
 ```
 
-### Key insight: Kubernetes APIs generated per-version, not manually maintained
+### Key insight: Kubernetes APIs generated, not manually maintained
 
 Instead of maintaining a `kube_apis.go` with ~100+ Kubernetes resource entries, the
-Kubernetes API inventory is **generated during rebase** in openshift/api using:
-
-1. **`clientgoscheme.Scheme`** — registers all Kubernetes API types from the vendored
-   `k8s.io/api` (openshift/api needs to vendor all scheme-registered packages for this)
-2. **`DefaultAPIResourceConfigSource()`** from vendored `k8s.io/kubernetes/pkg/controlplane/instance.go` —
-   lists which GroupVersions are enabled/disabled by default
-3. **`meta.UnsafeGuessKindToResource()`** — converts Kind → plural resource name
-4. **Type filtering** — remove List types (suffix "List"), Options types (suffix "Options"),
-   and a small blocklist of subresource-only types (~10 entries: Binding, Eviction, Scale,
-   TokenRequest, NodeProxyOptions, ServiceProxyOptions, PodProxyOptions, SerializedReference, RangeAllocation)
-
-The generator in openshift/api runs this derivation once per supported Kubernetes version
-and outputs **versioned static files**:
+Kubernetes API inventory is **generated during rebase** in openshift/api. The generator
+runs once per supported Kubernetes version and outputs **versioned static files**:
 - `payload-manifests/served-apis/kube-apis-1.35.yaml`
 - `payload-manifests/served-apis/kube-apis-1.36.yaml`
 - etc.
@@ -176,26 +165,34 @@ may not match what's vendored in the origin test binary (during rebase windows, 
 environments). The test queries the cluster's version and loads the matching file, making
 it robust to version skew.
 
-This means **no manual maintenance for Kubernetes APIs during rebases**. The generator
-derives the expected list from the vendored Kubernetes code, once per supported version.
+### How Kubernetes API derivation works
 
-### Relationship: DefaultAPIResourceConfigSource() is authoritative, scheme is a lookup
+The generation uses four components with a clear hierarchy:
 
-The two components work together with a clear hierarchy:
-
-**1. `DefaultAPIResourceConfigSource()` — AUTHORITATIVE**
+**1. `DefaultAPIResourceConfigSource()` — AUTHORITATIVE (what's served)**
+- From `k8s.io/kubernetes/pkg/controlplane` (not apiextensions or aggregator)
 - Answers: "Which GroupVersions are served by default?"
 - Source of truth for what's enabled/disabled in Kubernetes
 - Contains both enabled and disabled lists
 - This gates what we even look at
 
-**2. `clientgoscheme.Scheme` — HELPER/LOOKUP**
+**2. `clientgoscheme.Scheme` — HELPER (what types exist)**
+- From `k8s.io/client-go/kubernetes/scheme`
 - Answers: "What Kinds exist at a given GroupVersion?"
 - Type registry to enumerate resources within an enabled GV
 - Contains ALL historical types (enabled and disabled)
 - Only consulted for GVs that DefaultAPIResourceConfigSource() enables
+- Requires openshift/api to vendor all `k8s.io/api` packages
 
-**The workflow**:
+**3. `meta.UnsafeGuessKindToResource()` — CONVERTER (Kind → resource)**
+- Converts Kind names to plural resource names (e.g., Deployment → deployments)
+
+**4. Type filtering — CLEANUP**
+- Remove List types (suffix "List"), Options types (suffix "Options")
+- Small blocklist of subresource-only types (~10 entries: Binding, Eviction, Scale,
+  TokenRequest, NodeProxyOptions, ServiceProxyOptions, PodProxyOptions, SerializedReference, RangeAllocation)
+
+**The complete workflow**:
 ```go
 // 1. Get authority on what's enabled
 resourceConfig := controlplane.DefaultAPIResourceConfigSource()
@@ -217,7 +214,7 @@ including disabled APIs (superseded betas, disabled-by-default alphas/betas).
 
 **Without scheme**: We'd know which GroupVersions are enabled, but not what resources exist at each one.
 
-**Example**:
+**Concrete example**:
 ```
 DefaultAPIResourceConfigSource() answers: "Is apps/v1 enabled?" → YES
                     ↓
@@ -229,6 +226,9 @@ UnsafeGuessKindToResource() converts:
     Deployment → deployments
     StatefulSet → statefulsets
 ```
+
+**Result**: No manual maintenance needed. The generator derives the complete Kubernetes API
+inventory from vendored code during each rebase.
 
 ### Limitation: scheme is unreliable for Kubernetes-disabled beta GVs
 
