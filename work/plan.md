@@ -179,6 +179,57 @@ it robust to version skew.
 This means **no manual maintenance for Kubernetes APIs during rebases**. The generator
 derives the expected list from the vendored Kubernetes code, once per supported version.
 
+### Relationship: DefaultAPIResourceConfigSource() is authoritative, scheme is a lookup
+
+The two components work together with a clear hierarchy:
+
+**1. `DefaultAPIResourceConfigSource()` — AUTHORITATIVE**
+- Answers: "Which GroupVersions are served by default?"
+- Source of truth for what's enabled/disabled in Kubernetes
+- Contains both enabled and disabled lists
+- This gates what we even look at
+
+**2. `clientgoscheme.Scheme` — HELPER/LOOKUP**
+- Answers: "What Kinds exist at a given GroupVersion?"
+- Type registry to enumerate resources within an enabled GV
+- Contains ALL historical types (enabled and disabled)
+- Only consulted for GVs that DefaultAPIResourceConfigSource() enables
+
+**The workflow**:
+```go
+// 1. Get authority on what's enabled
+resourceConfig := controlplane.DefaultAPIResourceConfigSource()
+
+// 2. For each ENABLED GroupVersion
+for gv := range resourceConfig.EnabledVersions() {
+    
+    // 3. Use scheme as lookup: what Kinds exist at this GV?
+    for kind := range clientgoscheme.Scheme.KnownTypes(gv) {
+        
+        // 4. Convert Kind → Resource name
+        plural, _ := meta.UnsafeGuessKindToResource(gv.WithKind(kind))
+    }
+}
+```
+
+**Without DefaultAPIResourceConfigSource()**: We'd blindly enumerate everything in the scheme,
+including disabled APIs (superseded betas, disabled-by-default alphas/betas).
+
+**Without scheme**: We'd know which GroupVersions are enabled, but not what resources exist at each one.
+
+**Example**:
+```
+DefaultAPIResourceConfigSource() answers: "Is apps/v1 enabled?" → YES
+                    ↓
+Scheme answers: "What Kinds exist at apps/v1?"
+                    ↓
+    Deployment, StatefulSet, DaemonSet, ReplicaSet
+                    ↓
+UnsafeGuessKindToResource() converts:
+    Deployment → deployments
+    StatefulSet → statefulsets
+```
+
 ### Limitation: scheme is unreliable for Kubernetes-disabled beta GVs
 
 As explained in the "API Versioning and Feature Gates" section above, the scheme registers
