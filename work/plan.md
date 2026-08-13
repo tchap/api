@@ -262,7 +262,7 @@ The generation uses four components with a clear hierarchy:
 - Type registry to enumerate resources within an enabled GV
 - Contains ALL historical types (enabled and disabled)
 - Only consulted for GVs that DefaultAPIResourceConfigSource() enables
-- Requires openshift/api to vendor all `k8s.io/api` packages
+- Requires origin to vendor all `k8s.io/api` packages (origin already has this)
 
 **3. `meta.UnsafeGuessKindToResource()` — CONVERTER (Kind → resource)**
 - Converts Kind names to plural resource names (e.g., Deployment → deployments)
@@ -332,9 +332,9 @@ the scheme is reliable:
   matches what's served
 
 **Consequence**: Derive resources from the scheme for ALL GVs that
-`DefaultAPIResourceConfigSource()` enables. Only the **override map** (for GVs that
-OpenShift enables beyond Kubernetes defaults, like `admissionregistration.k8s.io/v1beta1`)
-needs explicit Kinds, because those GVs are Kubernetes-disabled and have graduated types.
+`DefaultAPIResourceConfigSource()` enables. Since we use origin's vendored Kubernetes
+(which includes any OpenShift-specific patches), the generated inventory captures the
+complete API surface without manual intervention.
 
 ---
 
@@ -447,13 +447,17 @@ The generator only processes CRDs available on the Default feature set, creating
 
 ### A4. Output Files
 
-**`servedapis/zz_generated.served_apis.go`** — single generated Go file containing all inventory data:
+**`servedapis/zz_generated_openshift.go`** — single generated Go file containing OpenShift-only inventory:
 
 ```go
 package servedapis
 
 // Required OpenShift API variables (core CRDs, aggregated servers - per profile, Default feature set only)
-var requiredSelfManagedHA = []ServedAPIEntry{ ... }
+var requiredSelfManagedHA = []ServedAPIEntry{
+    {Group: "config.openshift.io", Version: "v1", Resource: "clusterversions", Kind: "ClusterVersion", Scope: "Cluster", Source: SourceOpenShiftCRD},
+    {Group: "route.openshift.io", Version: "v1", Resource: "routes", Kind: "Route", Scope: "Namespaced", Source: SourceOpenShiftAPIServer},
+    // ... all core CRDs + aggregated server APIs
+}
 var requiredHypershift = []ServedAPIEntry{ ... }
 
 // Optional OpenShift API variables (optional operators - per profile, Default feature set only)
@@ -464,55 +468,22 @@ var optionalSelfManagedHA = []ServedAPIEntry{
 }
 var optionalHypershift = []ServedAPIEntry{ ... }
 
-// Kubernetes API variables (one per supported version)
-var kubeAPIs135 = []ServedAPIEntry{
-    {Group: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment", Scope: "Namespaced", Source: SourceCoreKube},
-    {Group: "apps", Version: "v1", Resource: "statefulsets", Kind: "StatefulSet", Scope: "Namespaced", Source: SourceCoreKube},
-    // ... ~100+ entries per version
-}
-var kubeAPIs136 = []ServedAPIEntry{ ... }
-var kubeAPIs137 = []ServedAPIEntry{ ... }
-
-// Lookup function - returns required and optional APIs separately
-func ForProfileAndVersion(clusterProfile ClusterProfile, kubeVersion *version.Version) (required, optional []ServedAPIEntry, found bool) {
-    // Get OpenShift APIs (required and optional)
-    var requiredOpenShift, optionalOpenShift []ServedAPIEntry
+// Lookup function - returns required and optional OpenShift APIs
+func ForProfile(clusterProfile ClusterProfile) (required, optional []ServedAPIEntry) {
     switch clusterProfile {
     case ClusterProfileSelfManagedHA:
-        requiredOpenShift = requiredSelfManagedHA
-        optionalOpenShift = optionalSelfManagedHA
+        return requiredSelfManagedHA, optionalSelfManagedHA
     case ClusterProfileHypershift:
-        requiredOpenShift = requiredHypershift
-        optionalOpenShift = optionalHypershift
+        return requiredHypershift, optionalHypershift
     default:
-        return nil, nil, false
+        return nil, nil
     }
-    
-    // Get Kubernetes APIs (always required) - uses major.minor only, ignores patch
-    var kubeAPIs []ServedAPIEntry
-    if kubeVersion.Major() == 1 {
-        switch kubeVersion.Minor() {
-        case 35:
-            kubeAPIs = kubeAPIs135
-        case 36:
-            kubeAPIs = kubeAPIs136
-        case 37:
-            kubeAPIs = kubeAPIs137
-        default:
-            return nil, nil, false  // minor version not found
-        }
-    } else {
-        return nil, nil, false  // unexpected major version
-    }
-    
-    // Combine and return
-    required = append(requiredOpenShift, kubeAPIs...)
-    optional = optionalOpenShift
-    return required, optional, true
 }
 ```
 
 All data is Go code - no YAML parsing needed. Entries are sorted by (group, version, resource) for stable diffs in code review.
+
+**Note:** This does NOT include Kubernetes APIs. Those are generated separately in origin (see Part B).
 
 ### A5. Build System
 
@@ -536,9 +507,15 @@ go run --mod=vendor github.com/openshift/api/payload-command/cmd/write-served-ap
 
 ## Part B: E2E Test (origin)
 
-### B1. Test File
+### B1. Test File Structure
 
-**`test/extended/apiserver/served_api_inventory.go`**
+**`test/extended/apiserver/inventory/`** — package containing Kubernetes inventory generation + test:
+- `types.go` — shared types (or import from o/api)
+- `generator.go` — Kubernetes API derivation logic
+- `zz_generated_kubernetes.go` — generated Kubernetes inventory
+- `served_api_inventory_test.go` — the e2e test
+
+**Generator binary**: `test/extended/apiserver/inventory/write-kube-api-inventory/main.go`
 
 ### B2. Test Logic
 
@@ -568,9 +545,9 @@ Steps:
    - Every served API not in `expectedRequired` or `expectedOptional` → **FAIL** with clear message listing unexpected GVRs
    - Optional API not served → **OK** (logged for visibility)
 
-### B5. Loading API Inventory
+### B3. Loading API Inventory
 
-The test calls a single function from vendored openshift/api:
+The test loads inventory from two sources:
 
 ```go
 import (
@@ -645,43 +622,50 @@ for gvr := range expectedOptional {
 
 **Handling missing version data (during rebase):**
 
-When a cluster is running Kubernetes 1.37 but openshift/api hasn't been updated yet to include
-version 1.37 in the generated code, `ForProfileAndVersion()` returns `(nil, nil, false)` and the test skips:
+When a cluster is running Kubernetes 1.37 but origin hasn't been updated yet to include
+version 1.37 in the generated code, `inventory.ForKubeVersion()` returns `(nil, false)` and the test skips:
 
 ```go
 // In test body
-required, optional, found := servedapis.ForProfileAndVersion(profile, kubeVersion)
+// Get OpenShift APIs
+osRequired, osOptional := servedapis.ForProfile(profile)
+
+// Get Kubernetes APIs
+kubeAPIs, found := inventory.ForKubeVersion(kubeVersion)
 if !found {
-    e2eskipper.Skipf("API inventory for profile=%s kubeVersion=%d.%d not found. This is expected during Kubernetes rebase. Update openshift/api and regenerate servedapis/zz_generated.served_apis.go", profile, kubeVersion.Major(), kubeVersion.Minor())
+    e2eskipper.Skipf("Kubernetes API inventory for kubeVersion=%d.%d not found. This is expected during Kubernetes rebase. Update origin and regenerate test/extended/apiserver/inventory/zz_generated_kubernetes.go", kubeVersion.Major(), kubeVersion.Minor())
 }
+
+// Combine
+required := append(osRequired, kubeAPIs...)
+optional := osOptional
 
 // Normal test flow - validate everything
 // required contains: Kubernetes APIs + core OpenShift CRDs + aggregated servers
 // optional contains: APIs from optional operators (monitoring, OLM, machine-api, etc.)
-// ... add overrides, compare against discovery
 ```
 
 **Why skip the entire test:**
 - Simple - no complex logic to filter Kubernetes APIs from comparison
 - Ginkgo marks as skipped (yellow in CI), not passed (green) - clear signal validation is incomplete
 - Forces attention during rebase - can't be ignored like a warning
-- During rebase, repos update in sequence (kubernetes → openshift/api → origin)
-- Once openshift/api is updated with new version file, test automatically starts running again
+- During rebase, origin bumps kubernetes vendor first, then regenerates Kubernetes inventory
+- Once origin regenerates the new version data, test automatically starts running again
 - Prevents test from blocking CI during rebase window
 
 **Why not validate OpenShift APIs only:**
 - Would need complex group filtering to avoid "unexpected API" failures on Kubernetes APIs
 - Partial validation is misleading - better to be explicit that validation is incomplete
-- Simpler to skip and wait for openshift/api update
+- Simpler to skip and wait for origin update
 
-### B3. Helpers to Reuse
+### B4. Helpers to Reuse
 
 - `exutil.GetControlPlaneTopology(oc)` — `test/extended/util/framework.go:2125`
 - Feature set detection — `test/extended/util/framework.go:2197` (`IsTechPreviewNoUpgrade`)
 - Discovery client error handling pattern from `DoesApiResourceExist` — `test/extended/util/framework.go:2224`
 - `diffMaps()` pattern from `test/extended/etcd/etcd_storage_path.go:457`
 
-### B4. Profile Mapping
+### B5. Profile Mapping
 
 ```go
 func clusterProfileName(topology configv1.TopologyMode) servedapis.ClusterProfile {
