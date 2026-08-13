@@ -121,46 +121,116 @@ cluster, and compares:
 
 ## Architecture
 
+**Split generation between openshift/api (OpenShift APIs) and origin (Kubernetes APIs)**
+
 ```
 openshift/api                              origin
-┌──────────────────────────────┐     ┌─────────────────────────────┐
-│ payload-command/cmd/         │     │ test/extended/apiserver/    │
-│   write-served-api-inventory │     │   served_api_inventory.go   │
-│                              │     │                             │
-│ payload-command/servedapis/  │     │ Detects cluster version,    │
-│   generator.go               │────>│ calls vendored function:    │
-│   aggregated_apis.go         │     │  · ForProfileAndVersion()   │
-│   optional_apis.go           │     │  · kube API override map    │
-│   kube_api_derivation.go     │     │                             │
-│   (scheme + config → GVRs)   │     │ Queries cluster discovery,  │
-│                              │     │ compares bidirectionally    │
-│ features/                    │     │                             │
-│   kube_api_overrides.go      │────>│                             │
-│                              │     └─────────────────────────────┘
-│ servedapis/                  │
-│   types.go                   │
-│   zz_generated.served_apis.go│  ← generated Go code, vendored
-│     · ForProfileAndVersion() │     into origin automatically
-│     · all inventory as vars  │
-└──────────────────────────────┘
+┌──────────────────────────────┐     ┌──────────────────────────────────┐
+│ payload-command/cmd/         │     │ test/extended/apiserver/         │
+│   write-served-api-inventory │     │   inventory/                     │
+│                              │     │                                  │
+│ payload-command/servedapis/  │     │   write-kube-api-inventory/      │
+│   generator.go               │     │     main.go                      │
+│   aggregated_apis.go         │     │     generator.go                 │
+│   optional_apis.go           │     │     (DefaultAPIResourceConfig    │
+│   (reads CRDs, no k8s vendor)│     │      + scheme → GVRs)            │
+│                              │     │                                  │
+│ servedapis/                  │     │   zz_generated_kubernetes.go     │
+│   types.go                   │     │     · kubeAPIs135 = []...        │
+│   zz_generated_openshift.go  │──┐  │     · kubeAPIs136 = []...        │
+│     · osAPIs{Profile} = []...│  │  │     · ForKubeVersion()           │
+│     · ForProfile()           │  │  │                                  │
+│ (vendored into origin)───────┘  └─>│   served_api_inventory_test.go   │
+│                              │     │     1. Import o/api OpenShift    │
+│ payload-manifests/crds/      │     │     2. Import local Kube         │
+│   (source for OpenShift APIs)│     │     3. Combine + compare         │
+│                              │     │                                  │
+│ hack/                        │     │   hack/                          │
+│   update-served-api-inv.sh   │     │     update-kube-api-inv.sh       │
+│   verify-served-api-inv.sh   │     │     verify-kube-api-inv.sh       │
+└──────────────────────────────┘     └──────────────────────────────────┘
+     ↑ make verify fails if               ↑ make verify fails if
+       CRD added w/o regen                   kube vendor bump w/o regen
 ```
 
-### Key insight: Kubernetes APIs generated, not manually maintained
+### Key insight: Split generation to avoid kubernetes vendor in openshift/api
 
-Instead of maintaining a `kube_apis.go` with ~100+ Kubernetes resource entries, the
-Kubernetes API inventory is **generated during rebase** in openshift/api. The generator
-runs once per supported Kubernetes version and outputs **versioned data as Go variables**
-in `zz_generated.served_apis.go`:
-- `var kubeAPIs135 = []ServedAPIEntry{ ... }`
-- `var kubeAPIs136 = []ServedAPIEntry{ ... }`
-- etc.
+**Why split:**
+- openshift/api is a lightweight API definition repository
+- Vendoring kubernetes would add massive bloat (~100MB+)
+- origin already vendors kubernetes for its own needs
 
-**Why per-version data:** The test runs against a live cluster whose Kubernetes version
+**Generation split:**
+1. **openshift/api**: Generates OpenShift-only inventory (CRDs + aggregated servers + optional APIs)
+   - No kubernetes vendor required
+   - CI verifies regeneration on CRD changes
+   - Exported via `servedapis.ForProfile(profile)`
+
+2. **origin**: Generates Kubernetes-only inventory using `DefaultAPIResourceConfigSource()`
+   - Already has kubernetes vendored
+   - Generates versioned data per Kubernetes version: `kubeAPIs135`, `kubeAPIs136`, etc.
+   - Exported via `inventory.ForKubeVersion(kubeVersion)`
+
+3. **Test**: Combines both at runtime
+   ```go
+   osRequired, osOptional := servedapis.ForProfile(profile)  // from vendored o/api
+   kubeAPIs := inventory.ForKubeVersion(kubeVersion)         // from local origin
+   required = append(osRequired, kubeAPIs...)
+   ```
+
+**Why per-version Kubernetes data:** The test runs against a live cluster whose Kubernetes version
 may not match what's vendored in the origin test binary (during rebase windows, in dev
-environments). The test queries the cluster's version and calls `ForProfileAndVersion()` with it,
-getting the matching data for both OpenShift and Kubernetes APIs, making it robust to version skew.
+environments). Versioned data makes the test robust to version skew.
 
-### How Kubernetes API derivation works
+### Why OpenShift APIs aren't versioned by Kubernetes version
+
+**Key insight:** OpenShift API inventory doesn't need explicit Kubernetes versioning because:
+
+1. **OpenShift APIs are defined by OpenShift release, not Kubernetes version**
+   - A `ClusterVersion` CRD is the same whether running on k8s 1.35 or 1.36
+   - OpenShift CRDs don't vary based on the underlying Kubernetes version
+   - What matters is "which OpenShift release" not "which Kubernetes version"
+
+2. **Vendor mechanism handles OpenShift versioning implicitly**
+   - origin vendors a specific commit of openshift/api
+   - That vendored snapshot contains the OpenShift APIs for that origin build
+   - Test uses whatever OpenShift APIs were vendored when the test binary was built
+   - This naturally matches what the cluster is serving (same origin build)
+
+3. **Kubernetes APIs DO vary by version**
+   - New APIs added: e.g., k8s 1.36 adds new resources not in 1.35
+   - APIs removed: beta APIs graduate and old versions stop being served
+   - Test binary built against k8s 1.35 needs data for k8s 1.36 clusters
+   - Hence explicit versioning: `kubeAPIs135`, `kubeAPIs136`, etc.
+
+**Example rebase scenario:**
+```
+OpenShift 4.19 ships with k8s 1.35:
+  - origin vendors o/api commit abc123 (contains 150 OpenShift CRDs)
+  - origin vendors k8s 1.35
+  - Test uses: OpenShift APIs from abc123 + k8s 1.35 data
+
+OpenShift 4.20 ships with k8s 1.36:
+  - origin vendors o/api commit def456 (contains 152 OpenShift CRDs - 2 added)
+  - origin vendors k8s 1.36
+  - Regenerate: adds kubeAPIs136 data
+  - Test uses: OpenShift APIs from def456 + k8s 1.36 data
+
+During rebase window (4.19 test binary, 4.20 cluster):
+  - Test queries cluster version → k8s 1.36
+  - OpenShift APIs: uses vendored abc123 (slightly stale, but close enough)
+  - Kubernetes APIs: uses kubeAPIs136 data (correct for cluster)
+  - Test might fail on 2 new OpenShift CRDs → expected, skip test
+```
+
+**The split is:**
+- **Explicit** Kubernetes versioning in origin (multiple versions supported)
+- **Implicit** OpenShift versioning via vendor (one version per origin build)
+
+### How Kubernetes API derivation works (in origin)
+
+**Note:** This happens in origin's generator, not openshift/api, because it requires
+vendoring kubernetes (which origin already has).
 
 The generation uses four components with a clear hierarchy:
 
@@ -316,7 +386,10 @@ The generator runs at openshift/api build time (during rebase), not at test runt
 
 ---
 
-## Part A: Static API Inventory Generator (openshift/api)
+## Part A: OpenShift API Inventory Generator (openshift/api)
+
+**Scope:** Generates OpenShift-only inventory (CRDs + aggregated servers + optional APIs).
+Does NOT include Kubernetes APIs (to avoid vendoring kubernetes dependency).
 
 ### A1. Types Package — `servedapis/`
 
@@ -349,22 +422,21 @@ type ServedAPIEntry struct {
 }
 ```
 
-**`servedapis/zz_generated.served_apis.go`** — generated file containing the full inventory data as Go literals. Provides:
+**`servedapis/zz_generated_openshift.go`** — generated file containing OpenShift-only inventory as Go literals. Provides:
 ```go
-import "k8s.io/apimachinery/pkg/util/version"
+package servedapis
 
-// Returns required and optional APIs for a given cluster profile and Kubernetes version
+// Returns required and optional OpenShift APIs for a given cluster profile
 // Only supports Default feature set - test skips on TechPreview/DevPreview
-// kubeVersion uses only major.minor (patch is ignored) - e.g., "1.35.0" and "1.35.2" both map to the same inventory
-func ForProfileAndVersion(clusterProfile ClusterProfile, kubeVersion *version.Version) (required, optional []ServedAPIEntry, found bool)
+// Does NOT include Kubernetes APIs - those are generated separately in origin
+func ForProfile(clusterProfile ClusterProfile) (required, optional []ServedAPIEntry)
 ```
 
 Returns two separate lists:
-- **required**: APIs that must be present (test fails if missing) - core Kubernetes, OpenShift CRDs, aggregated servers
+- **required**: OpenShift APIs that must be present (test fails if missing) - core CRDs, aggregated servers
 - **optional**: APIs from optional operators (test logs if missing, doesn't fail) - monitoring, OLM, machine-api, etc.
-- **found**: false during rebase windows when the Kubernetes version isn't generated yet
 
-This file gets vendored into origin automatically. Contains all inventory data - both OpenShift and Kubernetes APIs.
+This file gets vendored into origin automatically. Contains OpenShift APIs only.
 
 ### A2. Generator Tool — `payload-command/cmd/write-served-api-inventory/`
 
@@ -372,68 +444,19 @@ Standalone binary following the pattern of `write-available-featuresets`. Takes 
 
 **Generator logic** in `payload-command/servedapis/`:
 
-1. **`generator.go`** — main orchestration:
-   - **OpenShift APIs** (per ClusterProfile, FeatureSet):
+1. **`generator.go`** — main orchestration (OpenShift APIs only):
      - Reads CRD manifests from `payload-manifests/crds/`
      - Parses filename suffixes for profile detection (only processes Default feature set CRDs)
      - Extracts served GVRs from each CRD's `spec.versions[].served`, `spec.group`, `spec.names.plural/kind`, `spec.scope`
-     - Merges with hardcoded aggregated API server entries
-     - Merges with optional API entries
+     - Merges with hardcoded aggregated API server entries (from `aggregated_apis.go`)
+     - Merges with optional API entries (from `optional_apis.go`)
      - Generates Go variables for each profile (SelfManagedHA, Hypershift) - Default feature set only
    
-   - **Kubernetes APIs** (per supported kube version):
-     - For each supported kube minor version (e.g., 1.35, 1.36):
-       - Derives from vendored scheme + `DefaultAPIResourceConfigSource()`
-       - Filters and converts to GVRs
-       - Generates Go variable per version (e.g., `kubeAPIs135`, `kubeAPIs136`)
-   
-   - **Output**: Single `zz_generated.served_apis.go` file containing all inventory data as Go literals
+   - **Output**: Single `zz_generated_openshift.go` file containing OpenShift inventory as Go literals
 
-2. **`kube_api_derivation.go`** — scheme-based Kubernetes API derivation. Runs once per supported kube version:
-   ```go
-   import (
-       clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-       "k8s.io/apimachinery/pkg/api/meta"
-       "k8s.io/kubernetes/pkg/controlplane"  // IMPORTANT: Use this one, not apiextensions or aggregator
-   )
-   
-   func deriveKubernetesAPIs(kubeVersion string) []ServedAPIEntry {
-       // Get enabled GroupVersions from main kube-apiserver config
-       resourceConfig := controlplane.DefaultAPIResourceConfigSource()
-       
-       result := []ServedAPIEntry{}
-       for gv := range resourceConfig.EnabledVersions() {
-           for kind := range clientgoscheme.Scheme.KnownTypes(gv) {
-               if shouldSkipType(kind) { continue }
-               
-               plural, _ := meta.UnsafeGuessKindToResource(gv.WithKind(kind))
-               result = append(result, ServedAPIEntry{
-                   Group:    plural.Group,
-                   Version:  plural.Version,
-                   Resource: plural.Resource,
-                   Kind:     kind,
-                   Scope:    inferScope(kind),  // from scheme or defaults
-                   Source:   SourceCoreKube,
-               })
-           }
-       }
-       return result
-   }
-   
-   func shouldSkipType(kind string) bool {
-       if strings.HasSuffix(kind, "List") { return true }
-       if strings.HasSuffix(kind, "Options") { return true }
-       return subresourceOnlyTypes.Has(kind)
-   }
-   
-   var subresourceOnlyTypes = sets.New("Binding", "Eviction", "Scale",
-       "TokenRequest", "NodeProxyOptions", "ServiceProxyOptions",
-       "PodProxyOptions", "SerializedReference", "RangeAllocation")
-   ```
+2. **`aggregated_apis.go`** — hardcoded lists for openshift-apiserver (9 groups, ~35 resources) and oauth-apiserver (2 groups, ~10 resources). Based on the exploration findings. Changes very rarely.
 
-3. **`aggregated_apis.go`** — hardcoded lists for openshift-apiserver (9 groups, ~35 resources) and oauth-apiserver (2 groups, ~10 resources). Based on the exploration findings. Changes very rarely.
-
-4. **`optional_apis.go`** — APIs from optional operators (returned in the optional list, not required):
+3. **`optional_apis.go`** — APIs from optional operators (returned in the optional list, not required):
    - monitoring.coreos.com (alertmanagers, prometheuses, servicemonitors, etc.) - `Source: SourceOpenShiftCRD`
    - operators.coreos.com (clusterserviceversions, subscriptions, etc.) - `Source: SourceOpenShiftCRD`
    - packages.operators.coreos.com (packagemanifests) - `Source: SourceOpenShiftCRD`
@@ -842,13 +865,104 @@ The test **skips** on TechPreview and DevPreview feature sets:
 
 ---
 
+## Rebase Workflow
+
+### When rebasing to a new Kubernetes version (e.g., k8s 1.35 → 1.36)
+
+**Step 1: Update origin kubernetes vendor**
+```bash
+# In origin repo
+# Update go.mod to new k8s version
+# go mod vendor
+```
+
+**Step 2: Regenerate Kubernetes API inventory in origin**
+```bash
+# In origin repo
+make update-kube-api-inventory
+
+# This generates/updates:
+# - test/extended/apiserver/inventory/zz_generated_kubernetes.go
+# - Adds: var kubeAPIs136 = []ServedAPIEntry{ ... }
+# - Updates: ForKubeVersion() switch statement
+```
+
+**Step 3: Verify and commit in origin**
+```bash
+git diff test/extended/apiserver/inventory/zz_generated_kubernetes.go
+# Review: new APIs added, old APIs removed, etc.
+
+make verify-kube-api-inventory  # ensures no drift
+git add test/extended/apiserver/inventory/zz_generated_kubernetes.go
+git commit -m "Update Kubernetes API inventory for 1.36"
+```
+
+**Step 4: Update openshift/api vendor in origin (later)**
+```bash
+# After openshift/api merges any new CRDs for this release
+# Update origin's vendor of openshift/api
+# The test automatically picks up new OpenShift APIs via vendor
+```
+
+### When adding/modifying OpenShift CRDs
+
+**In openshift/api:**
+```bash
+# Edit CRD files in payload-manifests/crds/
+make update-served-api-inventory
+
+# This regenerates:
+# - servedapis/zz_generated_openshift.go (OpenShift APIs only)
+
+make verify  # CI fails if you forget this
+git commit -am "Add new MyCRD resource"
+```
+
+**In origin (after vendor bump):**
+```bash
+# Update vendor to pick up openshift/api changes
+# No regeneration needed - vendor bump is enough
+# Test automatically uses updated OpenShift APIs
+```
+
+### Key insight: Different update triggers
+
+**Kubernetes inventory (origin):**
+- **Trigger**: kubernetes vendor bump in origin
+- **Action**: Regenerate Kubernetes API inventory
+- **Adds**: New versioned data (kubeAPIsXXX)
+
+**OpenShift inventory (openshift/api):**
+- **Trigger**: CRD manifest changes in openshift/api
+- **Action**: Regenerate OpenShift API inventory
+- **Updates**: Same variables (requiredSelfManagedHA, etc.)
+
+**Test (origin):**
+- **Trigger**: vendor bump of openshift/api in origin
+- **Action**: None - automatically uses new vendored data
+- **Result**: Test validates updated OpenShift + versioned Kubernetes APIs
+
+---
+
 ## Verification
 
-1. **openshift/api CI**: `make verify` includes `verify-served-api-inventory` — ensures generated file is in sync
-2. **openshift/api rebase**: After k8s vendor bump → `make update` → review diff in `zz_generated.served_apis.go`
-3. **origin e2e**: Test runs as `[Suite:openshift/conformance/parallel]` on SelfManaged and HyperShift clusters with Default feature set (skips TechPreview/DevPreview to avoid volatility)
-4. **During development**: After modifying CRDs or feature gates → `make update` in openshift/api → review diff
-5. **Version skew handled**: Test queries cluster version and calls `ForProfileAndVersion()` with it, eliminating test-binary vs cluster-version mismatch
+### openshift/api CI (OpenShift APIs)
+1. **make verify**: includes `verify-served-api-inventory` — ensures `zz_generated_openshift.go` is current
+2. **CRD changes**: Adding/modifying CRDs without regenerating fails CI
+3. **Review diffs**: Changes to `zz_generated_openshift.go` show exactly which OpenShift APIs changed
+
+### origin CI (Kubernetes APIs + integration)
+1. **make verify**: includes `verify-kube-api-inventory` — ensures `zz_generated_kubernetes.go` is current
+2. **Kubernetes vendor bumps**: Updating k8s without regenerating fails CI
+3. **e2e test**: Runs as `[Suite:openshift/conformance/parallel]` on SelfManaged and HyperShift clusters
+   - Skips on TechPreview/DevPreview feature sets (only validates Default)
+   - Queries cluster for actual served APIs
+   - Compares against combined inventory (OpenShift from vendor + Kubernetes from local gen)
+
+### Version skew handling
+- **Kubernetes**: Test queries cluster version → uses matching `kubeAPIsXXX` data → handles test binary vs cluster mismatch
+- **OpenShift**: Test uses vendored o/api snapshot → matches what the origin build ships → no mismatch in practice
+- **Rebase window**: If cluster runs newer k8s version than test has data for → test skips (expected, not a failure)
 
 ---
 
