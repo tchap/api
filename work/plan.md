@@ -71,53 +71,68 @@ GroupVersions **enabled by default** in the main kube-apiserver:
 
 ### OpenShift Feature Gates and Kubernetes APIs
 
-OpenShift can enable **additional Kubernetes feature gates** beyond the defaults. When it does,
-those gates may enable alpha/beta APIs that aren't in `DefaultAPIResourceConfigSource()`.
+OpenShift may enable **additional Kubernetes feature gates** beyond upstream defaults. When it does,
+those gates may enable alpha/beta APIs that aren't in upstream `DefaultAPIResourceConfigSource()`.
 
-**Example**: OpenShift enables the `MutatingAdmissionPolicy` feature gate:
-- Kubernetes default: gate disabled → `admissionregistration.k8s.io/v1beta1` MutatingAdmissionPolicy **not served**
-- OpenShift: enables the gate → API **is served**
-- This is what the override map captures: "when this OpenShift feature gate is on, these extra Kubernetes APIs become available"
+**Handling in this design:**
+- The Kubernetes inventory is generated from origin's vendored k8s (not upstream k8s)
+- If OpenShift patches the kube-apiserver to enable extra gates by default, those APIs will be in `DefaultAPIResourceConfigSource()` in origin's vendor
+- Generator captures whatever is actually enabled in origin's build → static inventory is complete
+- No runtime gate consultation needed - Default feature set has deterministic API surface
+
+**Example**: If OpenShift 4.19 enables the `MutatingAdmissionPolicy` feature gate by default:
+- origin's k8s vendor (potentially patched) has this gate enabled
+- Generator runs against origin's vendor → sees `admissionregistration.k8s.io/v1beta1` MutatingAdmissionPolicy enabled
+- Static inventory includes it → test validates it's served
 
 ## Test Flow
 
-The e2e test in origin builds the expected API set from three sources, queries the
+The e2e test in origin builds the expected API set from static inventory, queries the
 cluster, and compares:
 
 ```
  1. Detect cluster state
     ├── profile      ← Infrastructure.Status.ControlPlaneTopology (Hypershift vs SelfManaged)
     ├── featureSet   ← FeatureGate("cluster").Spec.FeatureSet → skip test if not "Default"
-    ├── enabledGates ← FeatureGate("cluster").Status.FeatureGates (list of active gates)
     └── kubeVersion  ← ClusterVersion.Status.Desired.Version → parse kube minor (e.g., "1.35")
 
- 2. Build expected API set
+ 2. Build expected API set (purely static, no runtime gate consultation)
     │
-    ├─ Base APIs (OpenShift + Kubernetes combined, Default feature set only)
-    │  servedapis.ForProfileAndVersion(profile, kubeVersion)
+    ├─ OpenShift APIs from vendored o/api
+    │  servedapis.ForProfile(profile)
     │  → OpenShift CRDs (Default feature set only)
     │  → Aggregated API server resources (openshift-apiserver, oauth-apiserver)
     │  → Optional operator APIs (monitoring, OLM, machine-api, etc.)
-    │  → Kubernetes built-in APIs (generated during rebase via scheme + DefaultAPIResourceConfigSource)
-    │  → versioned to handle skew between test binary and cluster
+    │  → Returns: required, optional lists
     │
-    └─ Kubernetes overrides (OpenShift feature gates that enable extra k8s APIs)
-       for each enabledGate: look up override entries from map in openshift/api
-       filter to KubeVersionRange matching kubeVersion
-       entries have explicit Kinds (not derived from scheme — see limitation below)
-       e.g. MutatingAdmissionPolicy → MutatingAdmissionPolicy, MutatingAdmissionPolicyBinding
-            at admissionregistration.k8s.io/v1beta1
-       → UnsafeGuessKindToResource() on each Kind → GVRs
+    └─ Kubernetes APIs from local origin generation
+       inventory.ForKubeVersion(kubeVersion)
+       → Kubernetes built-in APIs for this k8s version
+       → Generated using DefaultAPIResourceConfigSource() at build time
+       → Returns: kubeAPIs list (all required)
+       → Returns found=false if kubeVersion not in generated inventory
+
+    Combine: required = osRequired + kubeAPIs
+             optional = osOptional
 
  3. Query cluster
     discovery.ServerGroupsAndResources()
     → filter out subresources (names containing "/")
+    → convert to GVR set
 
  4. Compare (bidirectional)
-    missing  = expected(required) - actual   → FAIL
-    unknown  = actual - expected(all)        → FAIL
-    optional absent                          → OK (log only)
+    missing  = expectedRequired - actual  → FAIL (with clear list of missing GVRs)
+    unknown  = actual - (required ∪ optional) → FAIL (with clear list of unexpected GVRs)
+    optional absent = expectedOptional - actual → OK (log only for visibility)
 ```
+
+**Why no runtime feature gate consultation:**
+- Default feature set has a deterministic API surface
+- Static inventory captures the complete expected state for Default
+- Any APIs gated by feature flags are either:
+  - Included in Default → already in static inventory
+  - Not in Default → test skips (we don't validate TechPreview)
+- Simpler, more maintainable, no need for gate-to-API mapping
 
 ## Architecture
 
@@ -320,69 +335,6 @@ the scheme is reliable:
 `DefaultAPIResourceConfigSource()` enables. Only the **override map** (for GVs that
 OpenShift enables beyond Kubernetes defaults, like `admissionregistration.k8s.io/v1beta1`)
 needs explicit Kinds, because those GVs are Kubernetes-disabled and have graduated types.
-
-### Kubernetes API overrides from OpenShift feature gates
-
-As explained in the "API Versioning and Feature Gates" section, OpenShift can enable
-additional Kubernetes feature gates beyond defaults. OpenShift enables certain alpha/beta
-Kubernetes APIs when specific OpenShift feature gates are active (e.g., `MutatingAdmissionPolicy`
-gate enables `MutatingAdmissionPolicy` and `MutatingAdmissionPolicyBinding` at
-`admissionregistration.k8s.io/v1beta1`).
-
-These APIs are NOT in `DefaultAPIResourceConfigSource()` — they're disabled by default
-in Kubernetes but added to the kube-apiserver's `--runtime-config` by the
-cluster-kube-apiserver-operator. And because the scheme is unreliable for these
-Kubernetes-disabled GVs (see above), the override map must list **explicit Kinds**,
-not just GroupVersions.
-
-**Why explicit Kinds are required** — concrete example:
-
-When the `MutatingAdmissionPolicy` feature gate is enabled, it enables
-`admissionregistration.k8s.io/v1beta1`. If we tried to derive types from the scheme:
-
-```go
-// Without explicit Kinds - deriving from scheme
-gv := schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"}
-for kind := range clientgoscheme.Scheme.KnownTypes(gv) {
-    // Scheme returns 6 types:
-    // ✓ MutatingAdmissionPolicy (actually served at v1beta1)
-    // ✓ MutatingAdmissionPolicyBinding (actually served at v1beta1)
-    // ✗ ValidatingWebhookConfiguration (graduated to v1, NOT served at v1beta1)
-    // ✗ MutatingWebhookConfiguration (graduated to v1, NOT served at v1beta1)
-    // ✗ ValidatingAdmissionPolicy (graduated to v1, NOT served at v1beta1)
-    // ✗ ValidatingAdmissionPolicyBinding (graduated to v1, NOT served at v1beta1)
-}
-```
-
-**Result without explicit Kinds**: Test would expect all 6 types at v1beta1, but the cluster
-only serves 2 at v1beta1 (the other 4 are at v1). Test fails with "missing APIs":
-- `admissionregistration.k8s.io/v1beta1 ValidatingWebhookConfiguration`
-- `admissionregistration.k8s.io/v1beta1 MutatingWebhookConfiguration`
-- `admissionregistration.k8s.io/v1beta1 ValidatingAdmissionPolicy`
-- `admissionregistration.k8s.io/v1beta1 ValidatingAdmissionPolicyBinding`
-
-**Result with explicit Kinds**: Override map says "only these 2 Kinds", test expects only what's
-actually served, test passes.
-
-The mapping of OpenShift feature gate → additional Kubernetes API resources lives in
-openshift/api, co-located with the feature gate definitions. This could be an extension
-of the feature gate builder pattern in `features/features.go` or a separate registry
-in `features/` or `servedapis/`.
-
-Currently this data is maintained separately in
-`cluster-kube-apiserver-operator/pkg/operator/configobservation/apienablement/observe_runtime_config.go`
-(`defaultGroupVersionsByFeatureGate`). Moving it to openshift/api means:
-- The e2e test in origin gets it for free via vendoring
-- The kube-apiserver operator can also consume it instead of maintaining its own copy
-- It's versioned alongside the feature gates themselves
-
-At test time, the e2e test reads the cluster's enabled feature gates from
-`FeatureGate("cluster").Status.FeatureGates`, queries the cluster's Kubernetes version,
-filters the override map to entries matching that version, and adds them to the expected set.
-
-Note: openshift/api needs to vendor the complete `k8s.io/api` (not just the partial set
-it currently has) to run the scheme-based Kubernetes API derivation during generation.
-The generator runs at openshift/api build time (during rebase), not at test runtime.
 
 ---
 
@@ -600,14 +552,13 @@ Steps:
    - `profile` = `exutil.GetControlPlaneTopology(oc)` — `External` → Hypershift, otherwise SelfManaged
    - `featureSet` = `FeatureGates("cluster").Spec.FeatureSet`
    - **Skip if not Default**: `if featureSet != "Default" { e2eskipper.Skipf("Test only runs on Default feature set, got %s", featureSet) }`
-   - `enabledGates` = `FeatureGates("cluster").Status.FeatureGates` — list of enabled feature gates
    - `kubeVersion` = parse minor version from `ClusterVersion("version").Status.Desired.Version` (e.g., "4.19.0-0.nightly-2026-08-11-225619" → "1.35")
 
-2. **Build expected sets**:
-   - **Base APIs**: `required, optional, found := servedapis.ForProfileAndVersion(profile, kubeVersion)` from vendored openshift/api
-     - Returns two separate lists: required APIs and optional APIs (for Default feature set only)
+2. **Build expected sets** (purely static):
+   - **OpenShift APIs**: `osRequired, osOptional := servedapis.ForProfile(profile)` from vendored openshift/api
+   - **Kubernetes APIs**: `kubeAPIs, found := inventory.ForKubeVersion(kubeVersion)` from local origin generation
      - If `found == false` (during rebase window when kubeVersion not generated): skip entire test
-   - **Kubernetes overrides**: For each `enabledGate`, look up override entries from `KubeAPIOverridesByFeatureGate` map in openshift/api, filter to those matching `kubeVersion` range, add their GVRs to required list
+   - **Combine**: `required = append(osRequired, kubeAPIs...)`, `optional = osOptional`
    - **Convert to sets**: `expectedRequired`, `expectedOptional`
 
 3. **Query actual APIs**: `kubeClient.Discovery().ServerGroupsAndResources()` — filter out subresources (resource names containing `/`)
@@ -644,16 +595,18 @@ if err != nil {
     framework.Failf("Failed to parse Kubernetes version: %v", err)
 }
 
-required, optional, found := servedapis.ForProfileAndVersion(profile, kubeVersion)
+// Get OpenShift APIs from vendored o/api
+osRequired, osOptional := servedapis.ForProfile(profile)
+
+// Get Kubernetes APIs from local origin generation
+kubeAPIs, found := inventory.ForKubeVersion(kubeVersion)
 if !found {
-    e2eskipper.Skipf("API inventory for profile=%s kubeVersion=%d.%d not found. This is expected during Kubernetes rebase.", profile, kubeVersion.Major(), kubeVersion.Minor())
+    e2eskipper.Skipf("API inventory for kubeVersion=%d.%d not found. This is expected during Kubernetes rebase.", kubeVersion.Major(), kubeVersion.Minor())
 }
 
-// Add override APIs for enabled feature gates (to required list)
-for _, gate := range enabledGates {
-    overrides := getOverridesForGate(gate, kubeVersion)
-    required = append(required, overrides...)
-}
+// Combine (no runtime feature gate consultation needed - static inventory is complete)
+required := append(osRequired, kubeAPIs...)
+optional := osOptional
 
 // Convert to GVR sets
 expectedRequired := toGVRSet(required)
@@ -787,49 +740,9 @@ During a Kubernetes rebase in openshift/api:
 - GroupVersions moving from disabled to enabled (or vice versa) → reflected in `DefaultAPIResourceConfigSource()`
 - The generated `kubeAPIs{version}` variables capture the complete state for that kube version
 
-**What needs manual attention**:
-- **Kubernetes API override map**: If the rebase changes which alpha/beta APIs exist for a feature-gate-enabled GroupVersion (e.g., `v1alpha1` → `v1beta1` for MutatingAdmissionPolicy), update `features/kube_api_overrides.go`
-- **New kube version**: Add new case to `ForProfileAndVersion()` function and generate new `kubeAPIs{newVersion}` variable
-- **OpenShift CRD changes**: If the rebase changes OpenShift CRDs, `make update` regenerates both kube and OpenShift inventories
-
-### Per-version override map
-
-The Kubernetes API override map should be version-aware, since different Kubernetes
-versions may need different overrides for the same feature gate (e.g.,
-`MutatingAdmissionPolicy` enables `v1alpha1` on kube 1.33 but `v1beta1` on kube 1.34+).
-
-This already exists in `cluster-kube-apiserver-operator` as the `KubeVersionRange`
-field on `groupVersionKindsByOpenshiftVersion`. The same pattern applies here:
-
-```go
-// features/kube_api_overrides.go
-type KubeAPIOverride struct {
-    GroupVersion     schema.GroupVersion
-    Kinds            []string      // explicit — scheme is unreliable for alpha/beta GVs
-    KubeVersionRange semver.Range  // nil means all versions
-}
-
-var KubeAPIOverridesByFeatureGate = map[FeatureGateName][]KubeAPIOverride{
-    "MutatingAdmissionPolicy": {
-        {KubeVersionRange: semver.MustParseRange(">=1.33.0 <1.34.0"),
-         GroupVersion: schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1alpha1"},
-         Kinds: []string{"MutatingAdmissionPolicy", "MutatingAdmissionPolicyBinding"}},
-        {KubeVersionRange: semver.MustParseRange(">=1.34.0 <1.37.0"),
-         GroupVersion: schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1beta1"},
-         Kinds: []string{"MutatingAdmissionPolicy", "MutatingAdmissionPolicyBinding"}},
-    },
-}
-```
-
-**Why explicit Kinds**: The scheme registers types at old GVs for serialization
-backward compatibility even after graduation. `admissionregistration.k8s.io/v1beta1`
-has 6 types in the scheme, but only 2 are actually served — the other 4 graduated
-to v1. We can't derive resources from the scheme for alpha/beta GVs.
-
-At test time, Kinds are converted to GVRs via `UnsafeGuessKindToResource()`. The test
-queries the cluster's actual Kubernetes version (from `ClusterVersion.Status.Desired.Version`
-or kube-apiserver version endpoint), and filters the override map to only entries whose
-`KubeVersionRange` matches that version.
+**What needs manual attention in origin**:
+- **New kube version**: Add new case to `ForKubeVersion()` function and generate new `kubeAPIs{newVersion}` variable
+- **OpenShift CRD changes**: When origin bumps openshift/api vendor, test automatically uses updated CRDs
 
 ---
 
@@ -970,25 +883,35 @@ git commit -am "Add new MyCRD resource"
 
 ### In openshift/api:
 
-1. Create `servedapis/types.go`
+1. Create `servedapis/types.go` — shared types (ClusterProfile, Source, ServedAPIEntry)
 2. Create generator package `payload-command/servedapis/`:
-   - `generator.go` — main orchestration for OpenShift APIs
-   - `kube_api_derivation.go` — scheme-based Kubernetes API derivation per version
+   - `generator.go` — reads CRDs, orchestrates generation (OpenShift APIs only, no k8s vendor)
    - `aggregated_apis.go` — hardcoded aggregated API server lists
    - `optional_apis.go` — optional operator API lists
-3. Create `features/kube_api_overrides.go` — feature-gate → Kubernetes API mapping with version ranges
-4. Create `payload-command/cmd/write-served-api-inventory/main.go`
-5. Create `hack/update-served-api-inventory.sh` and `hack/verify-served-api-inventory.sh`
-6. Wire into Makefile: `update-served-api-inventory`, `verify-served-api-inventory`, `build`
-7. Run generator → produces:
-   - `servedapis/zz_generated.served_apis.go` (all inventory data as Go code)
+3. Create `payload-command/cmd/write-served-api-inventory/main.go`
+4. Create `hack/update-served-api-inventory.sh` and `hack/verify-served-api-inventory.sh`
+5. Wire into Makefile: `update-served-api-inventory`, `verify-served-api-inventory`, `build`
+6. Run generator → produces:
+   - `servedapis/zz_generated_openshift.go` (OpenShift-only inventory as Go code)
+   - Exported via `ForProfile(clusterProfile)`
 
 ### In origin:
 
-8. Vendor updated openshift/api
-9. Create `test/extended/apiserver/served_api_inventory.go`:
-   - Call `servedapis.ForProfileAndVersion()` from vendored openshift/api
+7. Create `test/extended/apiserver/inventory/` package:
+   - `types.go` — same ServedAPIEntry type (or import from o/api)
+   - `generator.go` — Kubernetes API derivation using `DefaultAPIResourceConfigSource()` + scheme
+   - `zz_generated_kubernetes.go` — generated Kubernetes-only inventory (versioned)
+8. Create `test/extended/apiserver/inventory/write-kube-api-inventory/main.go`
+9. Create `hack/update-kube-api-inventory.sh` and `hack/verify-kube-api-inventory.sh`
+10. Wire into Makefile
+11. Vendor updated openshift/api
+12. Run Kubernetes generator → produces versioned data: `kubeAPIs135`, `kubeAPIs136`, etc.
+13. Create `test/extended/apiserver/inventory/served_api_inventory_test.go`:
+   - Import `servedapis.ForProfile()` from vendored openshift/api
+   - Import `inventory.ForKubeVersion()` from local package
    - Detect cluster profile, feature set, kube version
+   - Combine OpenShift + Kubernetes inventories
+   - Query discovery, compare
    - Build expected sets from three sources
    - Query discovery
    - Bidirectional compare
