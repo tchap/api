@@ -874,11 +874,8 @@ git commit -am "Add new MyCRD resource"
    - Import `inventory.ForKubeVersion()` from local package
    - Detect cluster profile, feature set, kube version
    - Combine OpenShift + Kubernetes inventories
-   - Query discovery, compare
-   - Build expected sets from three sources
-   - Query discovery
-   - Bidirectional compare
-10. Test against real cluster
+   - Query discovery, bidirectional compare
+14. Test against real cluster
 
 ---
 
