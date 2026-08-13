@@ -724,27 +724,6 @@ new CRDs during the time between the openshift/api merge and the origin vendor b
 
 ---
 
-## Kubernetes Rebase
-
-During a Kubernetes rebase in openshift/api:
-
-1. **Update vendored k8s.io dependencies** in openshift/api (update `k8s.io/api`, `k8s.io/client-go`, `k8s.io/kubernetes`)
-2. **Regenerate Kubernetes API data**: Run the generator (via `make update`) to update `zz_generated.served_apis.go` with new version data
-3. **Review the diff** in `servedapis/zz_generated.served_apis.go` — check the new `kubeAPIs{version}` variable to see which APIs changed
-4. **Update override map** if needed (see below)
-5. **Vendor bump in origin**: When origin vendors the updated openshift/api, the test automatically picks up the new Kubernetes API data
-
-**What changes automatically**:
-- New resources added to existing stable GroupVersions → scheme-based generation picks them up
-- Resources removed from Kubernetes → absent from generated data
-- GroupVersions moving from disabled to enabled (or vice versa) → reflected in `DefaultAPIResourceConfigSource()`
-- The generated `kubeAPIs{version}` variables capture the complete state for that kube version
-
-**What needs manual attention in origin**:
-- **New kube version**: Add new case to `ForKubeVersion()` function and generate new `kubeAPIs{newVersion}` variable
-- **OpenShift CRD changes**: When origin bumps openshift/api vendor, test automatically uses updated CRDs
-
----
 
 ## Part C: Edge Cases
 
