@@ -84,18 +84,22 @@ OpenShift uses its own **OpenShift feature gates** (defined in openshift/api) to
 - `DefaultAPIResourceConfigSource()` returns **upstream defaults only**
 - `features/kube_api_overrides.go` maps OpenShift feature gates → extra Kubernetes APIs
 - origin's generator (at build time):
-  - Derives base APIs from `DefaultAPIResourceConfigSource()`
-  - Checks which OpenShift feature gates exist in vendored openshift/api
-  - Adds corresponding extra Kubernetes APIs from the override mapping
+  - Derives **base** Kubernetes APIs from `DefaultAPIResourceConfigSource()`
+  - Generates static inventory: `kubeAPIs135`, `kubeAPIs136`, etc.
+  - Does NOT include feature-gate-enabled APIs (those are added at runtime)
+- Test (at runtime):
+  - Loads base Kubernetes APIs from static inventory
+  - Queries `FeatureGate("cluster").Status.FeatureGates` for enabled gates
+  - For each enabled gate, looks up extra APIs from `kube_api_overrides.go`
   - Filters by Kubernetes version range
-  - Produces complete static inventory
-- No runtime gate consultation needed - Default feature set has deterministic API surface
+  - Adds extra APIs to expected set
 
-**Example**: If OpenShift 4.19 has the `MutatingAdmissionPolicy` feature gate and ships k8s 1.35:
-- Feature gate exists in `features/features.go`
-- Mapping in `kube_api_overrides.go` says: "MutatingAdmissionPolicy gate → add admissionregistration.k8s.io/v1beta1 APIs for k8s >=1.34"
-- Generator sees gate exists, version matches, adds v1beta1 APIs to `kubeAPIs135`
-- Static inventory includes it → test validates it's served
+**Example**: If cluster has `MutatingAdmissionPolicy` feature gate enabled and runs k8s 1.35:
+- Static inventory has base k8s 1.35 APIs (from `DefaultAPIResourceConfigSource()`)
+- Test queries cluster → sees `MutatingAdmissionPolicy` in enabled gates
+- Looks up in `kube_api_overrides.go` → finds v1beta1 APIs for k8s >=1.34
+- Adds `admissionregistration.k8s.io/v1beta1` APIs to expected set
+- Test validates they're served
 
 ## Test Flow
 
@@ -104,11 +108,12 @@ cluster, and compares:
 
 ```
  1. Detect cluster state
-    ├── profile      ← Infrastructure.Status.ControlPlaneTopology (Hypershift vs SelfManaged)
-    ├── featureSet   ← FeatureGate("cluster").Spec.FeatureSet → skip test if not "Default"
-    └── kubeVersion  ← ClusterVersion.Status.Desired.Version → parse kube minor (e.g., "1.35")
+    ├── profile       ← Infrastructure.Status.ControlPlaneTopology (Hypershift vs SelfManaged)
+    ├── featureSet    ← FeatureGate("cluster").Spec.FeatureSet → skip test if not "Default"
+    ├── enabledGates  ← FeatureGate("cluster").Status.FeatureGates (list of enabled gates)
+    └── kubeVersion   ← ClusterVersion.Status.Desired.Version → parse kube minor (e.g., "1.35")
 
- 2. Build expected API set (purely static, no runtime gate consultation)
+ 2. Build expected API set (static base + runtime feature gate additions)
     │
     ├─ OpenShift APIs from vendored o/api
     │  servedapis.ForProfile(profile)
@@ -117,14 +122,19 @@ cluster, and compares:
     │  → Optional operator APIs (monitoring, OLM, machine-api, etc.)
     │  → Returns: required, optional lists
     │
-    └─ Kubernetes APIs from local origin generation
-       inventory.ForKubeVersion(kubeVersion)
-       → Kubernetes built-in APIs for this k8s version
-       → Generated using DefaultAPIResourceConfigSource() at build time
-       → Returns: kubeAPIs list (all required)
-       → Returns found=false if kubeVersion not in generated inventory
+    ├─ Base Kubernetes APIs from local origin generation
+    │  inventory.ForKubeVersion(kubeVersion)
+    │  → Base Kubernetes APIs (from DefaultAPIResourceConfigSource)
+    │  → Returns: kubeAPIs list (all required)
+    │  → Returns found=false if kubeVersion not in generated inventory
+    │
+    └─ Extra Kubernetes APIs from enabled feature gates
+       for each gate in enabledGates:
+           overrides = features.KubeAPIOverridesByFeatureGate[gate]
+           filter overrides by kubeVersion range
+           add matching APIs to required list
 
-    Combine: required = osRequired + kubeAPIs
+    Combine: required = osRequired + kubeAPIs + extraKubeAPIs
              optional = osOptional
 
  3. Query cluster
@@ -589,12 +599,10 @@ import (
 )
 
 func generateKubernetesAPIs(kubeVersion string) []ServedAPIEntry {
-    // Parse version for range matching
-    semVersion, _ := semver.ParseTolerant(kubeVersion)  // "1.35" → semver{1, 35, 0}
-    
     result := []ServedAPIEntry{}
     
-    // 1. Get base Kubernetes APIs from DefaultAPIResourceConfigSource
+    // Get base Kubernetes APIs from DefaultAPIResourceConfigSource
+    // (upstream defaults - does NOT include feature-gate-enabled APIs)
     resourceConfig := controlplane.DefaultAPIResourceConfigSource()
     for gv := range resourceConfig.EnabledVersions() {
         for kind := range clientgoscheme.Scheme.KnownTypes(gv) {
@@ -612,53 +620,20 @@ func generateKubernetesAPIs(kubeVersion string) []ServedAPIEntry {
         }
     }
     
-    // 2. Add extra Kubernetes APIs from OpenShift feature gates
-    // (for gates that enable APIs not in upstream DefaultAPIResourceConfigSource)
-    for gateName, overrides := range features.KubeAPIOverridesByFeatureGate {
-        // Check if this feature gate is defined in OpenShift (from vendored o/api features/)
-        if !featureGateExists(gateName) {
-            continue
-        }
-        
-        // Find overrides matching this Kubernetes version
-        for _, override := range overrides {
-            // Skip if version range doesn't match
-            if override.KubeVersionRange != nil && !override.KubeVersionRange(semVersion) {
-                continue
-            }
-            
-            // Add each Kind from this override
-            for _, kind := range override.Kinds {
-                plural, _ := meta.UnsafeGuessKindToResource(override.GroupVersion.WithKind(kind))
-                result = append(result, ServedAPIEntry{
-                    Group:    plural.Group,
-                    Version:  plural.Version,
-                    Resource: plural.Resource,
-                    Kind:     kind,
-                    Scope:    inferScope(kind),
-                    Source:   SourceCoreKube,
-                })
-            }
-        }
-    }
-    
     return result
 }
 ```
 
 **Key points:**
 - Runs at build time (not test runtime) - once per supported Kubernetes version
-- Uses `DefaultAPIResourceConfigSource()` for base Kubernetes APIs
-- Adds extra APIs for OpenShift feature gates that exist in vendored o/api
-- Filters overrides by Kubernetes version range
+- Uses `DefaultAPIResourceConfigSource()` for **base** Kubernetes APIs only
+- Does NOT include feature-gate-enabled APIs (those are added at test runtime)
 - Generates static data: `kubeAPIs135`, `kubeAPIs136`, etc.
-- No runtime gate consultation needed - static inventory is complete for each version
 
-**Example:** If OpenShift 4.19 has the `MutatingAdmissionPolicy` feature gate defined and ships k8s 1.35:
-- Generator sees gate exists in vendored `features/features.go`
-- Filters `KubeAPIOverridesByFeatureGate["MutatingAdmissionPolicy"]` for version 1.35
-- Gets v1beta1 APIs (not v1alpha1 which was only for 1.33)
-- Adds to `kubeAPIs135` static data
+**Why not include feature gate APIs at build time:**
+- Different clusters may have different feature gates enabled
+- Test needs to validate what's actually enabled on the specific cluster
+- Runtime lookup is required to match cluster state
 
 ### B3. Test Logic
 
@@ -672,13 +647,15 @@ Steps:
    - `profile` = `exutil.GetControlPlaneTopology(oc)` — `External` → Hypershift, otherwise SelfManaged
    - `featureSet` = `FeatureGates("cluster").Spec.FeatureSet`
    - **Skip if not Default**: `if featureSet != "Default" { e2eskipper.Skipf("Test only runs on Default feature set, got %s", featureSet) }`
+   - `enabledGates` = `FeatureGates("cluster").Status.FeatureGates` — list of enabled feature gates
    - `kubeVersion` = parse minor version from `ClusterVersion("version").Status.Desired.Version` (e.g., "4.19.0-0.nightly-2026-08-11-225619" → "1.35")
 
-2. **Build expected sets** (purely static):
+2. **Build expected sets** (static base + runtime feature gate additions):
    - **OpenShift APIs**: `osRequired, osOptional := servedapis.ForProfile(profile)` from vendored openshift/api
-   - **Kubernetes APIs**: `kubeAPIs, found := inventory.ForKubeVersion(kubeVersion)` from local origin generation
+   - **Base Kubernetes APIs**: `kubeAPIs, found := inventory.ForKubeVersion(kubeVersion)` from local origin generation
      - If `found == false` (during rebase window when kubeVersion not generated): skip entire test
-   - **Combine**: `required = append(osRequired, kubeAPIs...)`, `optional = osOptional`
+   - **Extra Kubernetes APIs from feature gates**: For each `enabledGate`, look up override entries from `features.KubeAPIOverridesByFeatureGate`, filter by `kubeVersion` range, add to required list
+   - **Combine**: `required = append(osRequired, kubeAPIs..., extraKubeAPIs...)`, `optional = osOptional`
    - **Convert to sets**: `expectedRequired`, `expectedOptional`
 
 3. **Query actual APIs**: `kubeClient.Discovery().ServerGroupsAndResources()` — filter out subresources (resource names containing `/`)
@@ -718,14 +695,44 @@ if err != nil {
 // Get OpenShift APIs from vendored o/api
 osRequired, osOptional := servedapis.ForProfile(profile)
 
-// Get Kubernetes APIs from local origin generation
+// Get base Kubernetes APIs from local origin generation
 kubeAPIs, found := inventory.ForKubeVersion(kubeVersion)
 if !found {
     e2eskipper.Skipf("API inventory for kubeVersion=%d.%d not found. This is expected during Kubernetes rebase.", kubeVersion.Major(), kubeVersion.Minor())
 }
 
-// Combine (no runtime feature gate consultation needed - static inventory is complete)
+// Get extra Kubernetes APIs from enabled feature gates
+extraKubeAPIs := []ServedAPIEntry{}
+for _, gate := range enabledGates {
+    overrides, ok := features.KubeAPIOverridesByFeatureGate[gate]
+    if !ok {
+        continue  // gate not in override map, no extra APIs
+    }
+    
+    // Filter overrides by Kubernetes version range
+    for _, override := range overrides {
+        if override.KubeVersionRange != nil && !override.KubeVersionRange(kubeVersion) {
+            continue  // version doesn't match
+        }
+        
+        // Convert Kinds to ServedAPIEntries
+        for _, kind := range override.Kinds {
+            plural, _ := meta.UnsafeGuessKindToResource(override.GroupVersion.WithKind(kind))
+            extraKubeAPIs = append(extraKubeAPIs, ServedAPIEntry{
+                Group:    plural.Group,
+                Version:  plural.Version,
+                Resource: plural.Resource,
+                Kind:     kind,
+                Scope:    inferScope(kind),
+                Source:   SourceCoreKube,
+            })
+        }
+    }
+}
+
+// Combine all required APIs
 required := append(osRequired, kubeAPIs...)
+required = append(required, extraKubeAPIs...)
 optional := osOptional
 
 // Convert to GVR sets
@@ -773,18 +780,22 @@ version 1.37 in the generated code, `inventory.ForKubeVersion()` returns `(nil, 
 // Get OpenShift APIs
 osRequired, osOptional := servedapis.ForProfile(profile)
 
-// Get Kubernetes APIs
+// Get base Kubernetes APIs
 kubeAPIs, found := inventory.ForKubeVersion(kubeVersion)
 if !found {
     e2eskipper.Skipf("Kubernetes API inventory for kubeVersion=%d.%d not found. This is expected during Kubernetes rebase. Update origin and regenerate test/extended/apiserver/inventory/zz_generated_kubernetes.go", kubeVersion.Major(), kubeVersion.Minor())
 }
 
+// Get extra Kubernetes APIs from enabled feature gates (runtime consultation)
+extraKubeAPIs := getExtraKubeAPIsFromGates(enabledGates, kubeVersion)
+
 // Combine
 required := append(osRequired, kubeAPIs...)
+required = append(required, extraKubeAPIs...)
 optional := osOptional
 
 // Normal test flow - validate everything
-// required contains: Kubernetes APIs + core OpenShift CRDs + aggregated servers
+// required contains: base Kubernetes APIs + extra feature-gate APIs + core OpenShift CRDs + aggregated servers
 // optional contains: APIs from optional operators (monitoring, OLM, machine-api, etc.)
 ```
 
