@@ -3,7 +3,6 @@
 package servedapis
 
 var requiredSelfManagedHA = []ServedAPIEntry{
-	{Group: "apiextensions.openshift.io", Version: "v1alpha1", Resource: "compatibilityrequirements", Kind: "CompatibilityRequirement", Scope: ScopeCluster, Source: SourceOpenShiftCRD},
 	{Group: "apps.openshift.io", Version: "v1", Resource: "deploymentconfigs", Kind: "DeploymentConfig", Scope: ScopeNamespaced, Source: SourceOpenShiftAPIServer},
 	{Group: "authorization.openshift.io", Version: "v1", Resource: "clusterrolebindings", Kind: "ClusterRoleBinding", Scope: ScopeCluster, Source: SourceOpenShiftAPIServer},
 	{Group: "authorization.openshift.io", Version: "v1", Resource: "clusterroles", Kind: "ClusterRole", Scope: ScopeCluster, Source: SourceOpenShiftAPIServer},
@@ -77,7 +76,6 @@ var requiredSelfManagedHA = []ServedAPIEntry{
 	{Group: "operator.openshift.io", Version: "v1", Resource: "openshiftapiservers", Kind: "OpenShiftAPIServer", Scope: ScopeCluster, Source: SourceOpenShiftCRD},
 	{Group: "operator.openshift.io", Version: "v1", Resource: "openshiftcontrollermanagers", Kind: "OpenShiftControllerManager", Scope: ScopeCluster, Source: SourceOpenShiftCRD},
 	{Group: "operator.openshift.io", Version: "v1", Resource: "storages", Kind: "Storage", Scope: ScopeCluster, Source: SourceOpenShiftCRD},
-	{Group: "operator.openshift.io", Version: "v1alpha1", Resource: "clusterapis", Kind: "ClusterAPI", Scope: ScopeCluster, Source: SourceOpenShiftCRD},
 	{Group: "operator.openshift.io", Version: "v1alpha1", Resource: "imagecontentsourcepolicies", Kind: "ImageContentSourcePolicy", Scope: ScopeCluster, Source: SourceOpenShiftCRD},
 	{Group: "project.openshift.io", Version: "v1", Resource: "projectrequests", Kind: "ProjectRequest", Scope: ScopeCluster, Source: SourceOpenShiftAPIServer},
 	{Group: "project.openshift.io", Version: "v1", Resource: "projects", Kind: "Project", Scope: ScopeCluster, Source: SourceOpenShiftAPIServer},
@@ -142,7 +140,6 @@ var optionalSelfManagedHA = []ServedAPIEntry{
 }
 
 var requiredHyperShift = []ServedAPIEntry{
-	{Group: "apiextensions.openshift.io", Version: "v1alpha1", Resource: "compatibilityrequirements", Kind: "CompatibilityRequirement", Scope: ScopeCluster, Source: SourceOpenShiftCRD},
 	{Group: "apps.openshift.io", Version: "v1", Resource: "deploymentconfigs", Kind: "DeploymentConfig", Scope: ScopeNamespaced, Source: SourceOpenShiftAPIServer},
 	{Group: "authorization.openshift.io", Version: "v1", Resource: "clusterrolebindings", Kind: "ClusterRoleBinding", Scope: ScopeCluster, Source: SourceOpenShiftAPIServer},
 	{Group: "authorization.openshift.io", Version: "v1", Resource: "clusterroles", Kind: "ClusterRole", Scope: ScopeCluster, Source: SourceOpenShiftAPIServer},
@@ -211,7 +208,6 @@ var requiredHyperShift = []ServedAPIEntry{
 	{Group: "operator.openshift.io", Version: "v1", Resource: "openshiftapiservers", Kind: "OpenShiftAPIServer", Scope: ScopeCluster, Source: SourceOpenShiftCRD},
 	{Group: "operator.openshift.io", Version: "v1", Resource: "openshiftcontrollermanagers", Kind: "OpenShiftControllerManager", Scope: ScopeCluster, Source: SourceOpenShiftCRD},
 	{Group: "operator.openshift.io", Version: "v1", Resource: "storages", Kind: "Storage", Scope: ScopeCluster, Source: SourceOpenShiftCRD},
-	{Group: "operator.openshift.io", Version: "v1alpha1", Resource: "clusterapis", Kind: "ClusterAPI", Scope: ScopeCluster, Source: SourceOpenShiftCRD},
 	{Group: "operator.openshift.io", Version: "v1alpha1", Resource: "imagecontentsourcepolicies", Kind: "ImageContentSourcePolicy", Scope: ScopeCluster, Source: SourceOpenShiftCRD},
 	{Group: "project.openshift.io", Version: "v1", Resource: "projectrequests", Kind: "ProjectRequest", Scope: ScopeCluster, Source: SourceOpenShiftAPIServer},
 	{Group: "project.openshift.io", Version: "v1", Resource: "projects", Kind: "Project", Scope: ScopeCluster, Source: SourceOpenShiftAPIServer},

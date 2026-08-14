@@ -11,6 +11,8 @@ import (
 	"strings"
 	"text/template"
 
+	configv1 "github.com/openshift/api/config/v1"
+	"github.com/openshift/api/features"
 	"github.com/openshift/api/servedapis"
 	kyaml "sigs.k8s.io/yaml"
 
@@ -18,11 +20,30 @@ import (
 )
 
 const (
-	annotationIBMCloudManaged           = "include.release.openshift.io/ibm-cloud-managed"
-	annotationSelfManagedHA             = "include.release.openshift.io/self-managed-high-availability"
-	annotationFeatureSet                = "release.openshift.io/feature-set"
-	featureSetDefault                   = "Default"
+	annotationIBMCloudManaged = "include.release.openshift.io/ibm-cloud-managed"
+	annotationSelfManagedHA   = "include.release.openshift.io/self-managed-high-availability"
+	annotationFeatureSet      = "release.openshift.io/feature-set"
+	annotationFeatureGate     = "release.openshift.io/feature-gate"
+	featureSetDefault         = "Default"
 )
+
+// defaultEnabledFeatureGates returns the set of feature gate names that are enabled
+// in the Default feature set for any cluster profile and any supported OCP version.
+func defaultEnabledFeatureGates() map[string]bool {
+	enabled := map[string]bool{}
+	for _, byProfile := range features.AllFeatureSets() {
+		for _, byFeatureSet := range byProfile {
+			fged, ok := byFeatureSet[configv1.Default]
+			if !ok {
+				continue
+			}
+			for _, fg := range fged.Enabled {
+				enabled[string(fg.FeatureGateAttributes.Name)] = true
+			}
+		}
+	}
+	return enabled
+}
 
 // WriteServedAPIInventory generates servedapis/zz_generated_openshift.go from CRD manifests.
 type WriteServedAPIInventory struct {
@@ -119,13 +140,15 @@ func (o *WriteServedAPIInventory) loadCRDEntries() ([]crdFileEntry, error) {
 		return nil, fmt.Errorf("reading CRD dir %q: %w", o.CRDDir, err)
 	}
 
+	defaultGates := defaultEnabledFeatureGates()
+
 	var result []crdFileEntry
 	for _, f := range files {
 		if f.IsDir() || !strings.HasSuffix(f.Name(), ".yaml") {
 			continue
 		}
 		path := filepath.Join(o.CRDDir, f.Name())
-		entries, err := parseCRDFile(path)
+		entries, err := parseCRDFile(path, defaultGates)
 		if err != nil {
 			return nil, fmt.Errorf("parsing %q: %w", f.Name(), err)
 		}
@@ -136,7 +159,9 @@ func (o *WriteServedAPIInventory) loadCRDEntries() ([]crdFileEntry, error) {
 
 // parseCRDFile reads a single CRD YAML file and returns crdFileEntries for every
 // served version that belongs to the Default feature set.
-func parseCRDFile(path string) ([]crdFileEntry, error) {
+// defaultGates is the set of feature gate names enabled in Default, used to filter
+// CRDs annotated with release.openshift.io/feature-gate.
+func parseCRDFile(path string, defaultGates map[string]bool) ([]crdFileEntry, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -148,6 +173,14 @@ func parseCRDFile(path string) ([]crdFileEntry, error) {
 	}
 
 	annotations, _, _ := unstructured.NestedStringMap(obj, "metadata", "annotations")
+
+	// If the CRD is gated by a specific feature gate, only include it when that
+	// gate is enabled in the Default feature set.
+	if gate, ok := annotations[annotationFeatureGate]; ok && gate != "" {
+		if !defaultGates[gate] {
+			return nil, nil
+		}
+	}
 
 	// Only include CRDs that are deployed on the Default feature set.
 	if !isDefaultFeatureSet(annotations) {
