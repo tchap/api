@@ -71,18 +71,30 @@ GroupVersions **enabled by default** in the main kube-apiserver:
 
 ### OpenShift Feature Gates and Kubernetes APIs
 
-OpenShift may enable **additional Kubernetes feature gates** beyond upstream defaults. When it does,
-those gates may enable alpha/beta APIs that aren't in upstream `DefaultAPIResourceConfigSource()`.
+OpenShift uses its own **OpenShift feature gates** (defined in openshift/api) to enable additional Kubernetes APIs beyond upstream defaults. The cluster-kube-apiserver-operator reads these OpenShift feature gates and configures the kube-apiserver's `--runtime-config` to enable the corresponding Kubernetes APIs.
+
+**The flow:**
+1. OpenShift feature gate defined in `features/features.go` (e.g., `MutatingAdmissionPolicy`)
+2. cluster-kube-apiserver-operator reads enabled feature gates
+3. Operator adds corresponding Kubernetes APIs to kube-apiserver's `--runtime-config`
+4. kube-apiserver serves those additional APIs (not in upstream `DefaultAPIResourceConfigSource()`)
 
 **Handling in this design:**
-- The Kubernetes inventory is generated from origin's vendored k8s (not upstream k8s)
-- If OpenShift patches the kube-apiserver to enable extra gates by default, those APIs will be in `DefaultAPIResourceConfigSource()` in origin's vendor
-- Generator captures whatever is actually enabled in origin's build → static inventory is complete
+- origin's vendored k8s.io/kubernetes is **upstream** (not patched for feature gates)
+- `DefaultAPIResourceConfigSource()` returns **upstream defaults only**
+- `features/kube_api_overrides.go` maps OpenShift feature gates → extra Kubernetes APIs
+- origin's generator (at build time):
+  - Derives base APIs from `DefaultAPIResourceConfigSource()`
+  - Checks which OpenShift feature gates exist in vendored openshift/api
+  - Adds corresponding extra Kubernetes APIs from the override mapping
+  - Filters by Kubernetes version range
+  - Produces complete static inventory
 - No runtime gate consultation needed - Default feature set has deterministic API surface
 
-**Example**: If OpenShift 4.19 enables the `MutatingAdmissionPolicy` feature gate by default:
-- origin's k8s vendor (potentially patched) has this gate enabled
-- Generator runs against origin's vendor → sees `admissionregistration.k8s.io/v1beta1` MutatingAdmissionPolicy enabled
+**Example**: If OpenShift 4.19 has the `MutatingAdmissionPolicy` feature gate and ships k8s 1.35:
+- Feature gate exists in `features/features.go`
+- Mapping in `kube_api_overrides.go` says: "MutatingAdmissionPolicy gate → add admissionregistration.k8s.io/v1beta1 APIs for k8s >=1.34"
+- Generator sees gate exists, version matches, adds v1beta1 APIs to `kubeAPIs135`
 - Static inventory includes it → test validates it's served
 
 ## Test Flow
