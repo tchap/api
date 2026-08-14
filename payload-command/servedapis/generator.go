@@ -146,7 +146,9 @@ var crdDirSkipPrefixes = func() []string {
 		// config/v1alpha1 and v1alpha2: alpha versions superseded by config/v1
 		join("config", "v1alpha1"),
 		join("config", "v1alpha2"),
-		// etcd: pacemaker-based HA etcd, not on standard clusters
+		// etcd: pacemakerclusters CRDs are only deployed on pacemaker-based HA etcd clusters,
+		// not on standard Default clusters. The CRDs lack a feature-gate annotation that would
+		// normally cause the generator to filter them; they are listed explicitly in optional_apis.go.
 		"etcd",
 		// example: documentation/example CRDs, never deployed in production
 		"example",
@@ -155,12 +157,15 @@ var crdDirSkipPrefixes = func() []string {
 		join("insights", "v1alpha2"),
 		// machineconfiguration/v1alpha1: alpha resources not yet deployed on Default clusters
 		join("machineconfiguration", "v1alpha1"),
-		// network: OpenShift SDN virtual resources (clusternetworks, hostsubnets, etc.),
-		// served by the aggregated network API server, not present on OVN-K clusters
+		// network: OpenShift SDN virtual resources (clusternetworks, hostsubnets, etc.) are only
+		// served on clusters using the OpenShift SDN network plugin; OVN-Kubernetes clusters do
+		// not serve them. The CRDs lack a feature-gate annotation; they are listed in optional_apis.go.
 		"network",
 		// operator/v1alpha1: alpha versions superseded by operator/v1
 		join("operator", "v1alpha1"),
-		// sharedresource: TechPreview SharedResource CSI Driver (missing feature-gate annotation)
+		// sharedresource: TechPreview SharedResource CSI Driver CRDs are missing the
+		// release.openshift.io/feature-gate annotation that would normally filter them.
+		// Listed explicitly in optional_apis.go.
 		"sharedresource",
 	}
 }()
@@ -198,6 +203,9 @@ func (o *WriteServedAPIInventory) loadCRDEntries() ([]crdFileEntry, error) {
 		}
 
 		// Skip package directories on the skip list.
+		// Note: the skip list only covers packages whose CRDs are NOT deployed on Default
+		// clusters under any configuration. CRDs that ARE deployed on some configurations
+		// (e.g. SDN-only, pacemaker etcd) go in the optional list in optional_apis.go.
 		rel, err := filepath.Rel(o.SourceDir, path)
 		if err != nil {
 			return err

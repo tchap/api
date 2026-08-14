@@ -7,6 +7,10 @@ import "github.com/openshift/api/servedapis"
 // The same set applies to all cluster profiles.
 func optionalAPIEntries() []servedapis.ServedAPIEntry {
 	return []servedapis.ServedAPIEntry{
+		// etcd.openshift.io — pacemaker-based HA etcd clusters only
+		{Group: "etcd.openshift.io", Version: "v1", Resource: "pacemakerclusters", Kind: "PacemakerCluster", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOpenShiftCRD},
+		{Group: "etcd.openshift.io", Version: "v1alpha1", Resource: "pacemakerclusters", Kind: "PacemakerCluster", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOpenShiftCRD},
+
 		// autoscaling.openshift.io
 		{Group: "autoscaling.openshift.io", Version: "v1", Resource: "clusterautoscalers", Kind: "ClusterAutoscaler", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOpenShiftCRD},
 		{Group: "autoscaling.openshift.io", Version: "v1beta1", Resource: "machineautoscalers", Kind: "MachineAutoscaler", Scope: servedapis.ScopeNamespaced, Source: servedapis.SourceOpenShiftCRD},
@@ -135,6 +139,18 @@ func optionalAPIEntries() []servedapis.ServedAPIEntry {
 
 		// testextension.redhat.io — test-only, present on CI clusters
 		{Group: "testextension.redhat.io", Version: "v1", Resource: "testextensionadmissions", Kind: "TestExtensionAdmission", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOpenShiftCRD},
+
+		// network.openshift.io — OpenShift SDN; absent on OVN-Kubernetes clusters
+		{Group: "network.openshift.io", Version: "v1", Resource: "clusternetworks", Kind: "ClusterNetwork", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOpenShiftCRD},
+		{Group: "network.openshift.io", Version: "v1", Resource: "egressnetworkpolicies", Kind: "EgressNetworkPolicy", Scope: servedapis.ScopeNamespaced, Source: servedapis.SourceOpenShiftCRD},
+		{Group: "network.openshift.io", Version: "v1", Resource: "hostsubnets", Kind: "HostSubnet", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOpenShiftCRD},
+		{Group: "network.openshift.io", Version: "v1", Resource: "netnamespaces", Kind: "NetNamespace", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOpenShiftCRD},
+
+		// sharedresource.openshift.io — TechPreview SharedResource CSI Driver
+		// Note: these CRDs are missing the release.openshift.io/feature-gate annotation
+		// that would normally cause the generator to filter them; listed here explicitly.
+		{Group: "sharedresource.openshift.io", Version: "v1alpha1", Resource: "sharedconfigmaps", Kind: "SharedConfigMap", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOpenShiftCRD},
+		{Group: "sharedresource.openshift.io", Version: "v1alpha1", Resource: "sharedsecrets", Kind: "SharedSecret", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOpenShiftCRD},
 
 		// tuned.openshift.io
 		{Group: "tuned.openshift.io", Version: "v1", Resource: "profiles", Kind: "Profile", Scope: servedapis.ScopeNamespaced, Source: servedapis.SourceOpenShiftCRD},
