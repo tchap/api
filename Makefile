@@ -71,6 +71,7 @@ verify-non-codegen:
 	bash -x hack/verify-prerelease-lifecycle-gen.sh
 	hack/verify-payload-crds.sh
 	hack/verify-payload-featuregates.sh
+	hack/verify-served-api-inventory.sh
 
 .PHONY: verify-scripts
 verify-scripts: verify-non-codegen verify-codegen
@@ -109,7 +110,7 @@ verify-%:
 ################################################################################################
 
 .PHONY: update-scripts
-update-scripts: update-compatibility update-openapi update-deepcopy update-protobuf update-swagger-docs tests-vendor update-prerelease-lifecycle-gen update-payload-featuregates
+update-scripts: update-compatibility update-openapi update-deepcopy update-protobuf update-swagger-docs tests-vendor update-prerelease-lifecycle-gen update-payload-featuregates update-served-api-inventory
 
 # Update codegen runs all generators in the order they are defined in the root.go file.
 # The per group generators are:[compatibility, deepcopy, swagger-docs, empty-partial-schema, schema-patch, crd-manifest-merge]
@@ -157,6 +158,10 @@ update-payload-crds:
 .PHONY: update-payload-featuregates
 update-payload-featuregates:
 	hack/update-payload-featuregates.sh
+
+.PHONY: update-served-api-inventory
+update-served-api-inventory:
+	hack/update-served-api-inventory.sh
 
 #####################
 #
@@ -210,7 +215,7 @@ tests-vendor:
 ##################################
 
 .PHONY: build
-build: render write-available-featuresets
+build: render write-available-featuresets write-served-api-inventory
 
 render:
 	go build --mod=vendor -trimpath github.com/openshift/api/payload-command/cmd/render
@@ -218,9 +223,12 @@ render:
 write-available-featuresets:
 	go build --mod=vendor -trimpath github.com/openshift/api/payload-command/cmd/write-available-featuresets
 
+write-served-api-inventory:
+	go build --mod=vendor -trimpath github.com/openshift/api/payload-command/cmd/write-served-api-inventory
+
 .PHONY: clean
 clean:
-	rm -f render write-available-featuresets
+	rm -f render write-available-featuresets write-served-api-inventory
 	rm -rf tools/_output
 
 VERSION     ?= $(shell git describe --always --abbrev=7)
