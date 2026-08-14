@@ -9,6 +9,7 @@ func aggregatedAPIServerEntries() []servedapis.ServedAPIEntry {
 	entries := []servedapis.ServedAPIEntry{}
 	entries = append(entries, openshiftAPIServerEntries()...)
 	entries = append(entries, oauthAPIServerEntries()...)
+	entries = append(entries, operatorCRDEntries()...)
 	return entries
 }
 
@@ -77,6 +78,7 @@ func oauthAPIServerEntries() []servedapis.ServedAPIEntry {
 		{Group: "oauth.openshift.io", Version: "v1", Resource: "oauthauthorizetokens", Kind: "OAuthAuthorizeToken", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOAuthAPIServer},
 		{Group: "oauth.openshift.io", Version: "v1", Resource: "oauthclientauthorizations", Kind: "OAuthClientAuthorization", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOAuthAPIServer},
 		{Group: "oauth.openshift.io", Version: "v1", Resource: "oauthclients", Kind: "OAuthClient", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOAuthAPIServer},
+		{Group: "oauth.openshift.io", Version: "v1", Resource: "tokenreviews", Kind: "TokenReview", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOAuthAPIServer},
 		{Group: "oauth.openshift.io", Version: "v1", Resource: "useroauthaccesstokens", Kind: "UserOAuthAccessToken", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOAuthAPIServer},
 
 		// user.openshift.io/v1
@@ -84,5 +86,14 @@ func oauthAPIServerEntries() []servedapis.ServedAPIEntry {
 		{Group: "user.openshift.io", Version: "v1", Resource: "identities", Kind: "Identity", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOAuthAPIServer},
 		{Group: "user.openshift.io", Version: "v1", Resource: "useridentitymappings", Kind: "UserIdentityMapping", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOAuthAPIServer},
 		{Group: "user.openshift.io", Version: "v1", Resource: "users", Kind: "User", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOAuthAPIServer},
+	}
+}
+
+// operatorCRDEntries returns CRDs from operators that are always installed on Default clusters
+// but whose CRD definitions live in other repositories (not discoverable from zz_generated.crd-manifests/).
+func operatorCRDEntries() []servedapis.ServedAPIEntry {
+	return []servedapis.ServedAPIEntry{
+		// network.operator.openshift.io/v1 — cluster-network-operator (not in openshift/api)
+		{Group: "network.operator.openshift.io", Version: "v1", Resource: "operatorpkis", Kind: "OperatorPKI", Scope: servedapis.ScopeNamespaced, Source: servedapis.SourceOpenShiftCRD},
 	}
 }

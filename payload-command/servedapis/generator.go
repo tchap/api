@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"go/format"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -47,12 +48,14 @@ func defaultEnabledFeatureGates() map[string]bool {
 
 // WriteServedAPIInventory generates servedapis/zz_generated_openshift.go from CRD manifests.
 type WriteServedAPIInventory struct {
-	CRDDir      string
+	// SourceDir is the root of the openshift/api repository. The generator discovers all
+	// zz_generated.crd-manifests/ subdirectories under it automatically.
+	SourceDir   string
 	GoOutputDir string
 }
 
 func (o *WriteServedAPIInventory) AddFlags(fs *flag.FlagSet) {
-	fs.StringVar(&o.CRDDir, "crd-dir", o.CRDDir, "Directory containing CRD manifest YAML files.")
+	fs.StringVar(&o.SourceDir, "source-dir", o.SourceDir, "Root of the openshift/api repository. All zz_generated.crd-manifests/ subdirectories are scanned for CRD YAML files.")
 	fs.StringVar(&o.GoOutputDir, "go-output-dir", o.GoOutputDir, "Directory to write zz_generated_openshift.go into.")
 }
 
@@ -133,28 +136,43 @@ type crdFileEntry struct {
 	profiles []servedapis.ClusterProfile
 }
 
-// loadCRDEntries reads all *.crd.yaml files and returns entries for Default feature set only.
+// loadCRDEntries walks SourceDir for all zz_generated.crd-manifests/ directories and returns
+// entries for every CRD file that belongs to the Default feature set.
 func (o *WriteServedAPIInventory) loadCRDEntries() ([]crdFileEntry, error) {
-	files, err := os.ReadDir(o.CRDDir)
-	if err != nil {
-		return nil, fmt.Errorf("reading CRD dir %q: %w", o.CRDDir, err)
-	}
-
 	defaultGates := defaultEnabledFeatureGates()
 
 	var result []crdFileEntry
-	for _, f := range files {
-		if f.IsDir() || !strings.HasSuffix(f.Name(), ".yaml") {
-			continue
+	err := filepath.WalkDir(o.SourceDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		path := filepath.Join(o.CRDDir, f.Name())
+		// Only descend into zz_generated.crd-manifests directories.
+		if d.IsDir() {
+			if d.Name() == "zz_generated.crd-manifests" {
+				return nil // descend into it
+			}
+			// Skip vendor, tests, and the directory itself.
+			if d.Name() == "vendor" || d.Name() == "tests" {
+				return filepath.SkipDir
+			}
+			// Descend into anything else at the top level.
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".yaml") {
+			return nil
+		}
+		// Only process files directly inside a zz_generated.crd-manifests/ directory.
+		if filepath.Base(filepath.Dir(path)) != "zz_generated.crd-manifests" {
+			return nil
+		}
 		entries, err := parseCRDFile(path, defaultGates)
 		if err != nil {
-			return nil, fmt.Errorf("parsing %q: %w", f.Name(), err)
+			return fmt.Errorf("parsing %q: %w", path, err)
 		}
 		result = append(result, entries...)
-	}
-	return result, nil
+		return nil
+	})
+	return result, err
 }
 
 // parseCRDFile reads a single CRD YAML file and returns crdFileEntries for every

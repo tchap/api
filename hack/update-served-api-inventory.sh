@@ -3,5 +3,5 @@
 source "$(dirname "${BASH_SOURCE}")/lib/init.sh"
 
 go run --mod=vendor -trimpath github.com/openshift/api/payload-command/cmd/write-served-api-inventory \
-  --crd-dir=./payload-manifests/crds \
+  --source-dir=. \
   --go-output-dir=./servedapis
