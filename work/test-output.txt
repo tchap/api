@@ -1,0 +1,107 @@
+ // Run on a cluster started using
+ //   launch 5.0.0-0.ci-2026-08-14-013252 aws,compact
+
+  [sig-api-machinery][Suite:openshift/conformance/parallel] Served API inventory should match the expected list
+  github.com/openshift/origin/test/extended/apiserver/served_api_inventory.go:41
+    STEP: Creating a kubernetes client @ 08/14/26 13:20:38.615
+  I0814 13:20:39.042547  273464 served_api_inventory.go:65] cluster profile=SelfManagedHA featureSet="" kubeVersion=1.36.2
+  I0814 13:20:39.453409  273464 served_api_inventory.go:103] expected required=205 optional=98 actual=287
+  I0814 13:20:39.453503  273464 served_api_inventory.go:107] optional API served: whereabouts.cni.cncf.io/v1alpha1/overlappingrangeipreservations
+  I0814 13:20:39.453511  273464 served_api_inventory.go:107] optional API served: whereabouts.cni.cncf.io/v1alpha1/ippools
+  I0814 13:20:39.453516  273464 served_api_inventory.go:107] optional API served: cloudcredential.openshift.io/v1/credentialsrequests
+  I0814 13:20:39.453520  273464 served_api_inventory.go:107] optional API served: machine.openshift.io/v1beta1/machines
+  I0814 13:20:39.453537  273464 served_api_inventory.go:107] optional API served: monitoring.coreos.com/v1/prometheuses
+  I0814 13:20:39.453541  273464 served_api_inventory.go:107] optional API served: metal3.io/v1alpha1/dataimages
+  I0814 13:20:39.453545  273464 served_api_inventory.go:107] optional API served: gateway.networking.k8s.io/v1/gatewayclasses
+  I0814 13:20:39.453548  273464 served_api_inventory.go:107] optional API served: metal3.io/v1alpha1/bmceventsubscriptions
+  I0814 13:20:39.453551  273464 served_api_inventory.go:107] optional API served: olm.operatorframework.io/v1/clusterextensions
+  I0814 13:20:39.453554  273464 served_api_inventory.go:107] optional API served: ipam.cluster.x-k8s.io/v1beta1/ipaddresses
+  I0814 13:20:39.453557  273464 served_api_inventory.go:107] optional API served: snapshot.storage.k8s.io/v1/volumesnapshots
+  I0814 13:20:39.453560  273464 served_api_inventory.go:107] optional API served: monitoring.coreos.com/v1alpha1/alertmanagerconfigs
+  I0814 13:20:39.453563  273464 served_api_inventory.go:107] optional API served: testextension.redhat.io/v1/testextensionadmissions
+  I0814 13:20:39.453567  273464 served_api_inventory.go:107] optional API served: monitoring.coreos.com/v1/prometheusrules
+  I0814 13:20:39.453576  273464 served_api_inventory.go:107] optional API served: k8s.ovn.org/v1/egressfirewalls
+  I0814 13:20:39.453582  273464 served_api_inventory.go:107] optional API served: policy.networking.k8s.io/v1alpha1/adminnetworkpolicies
+  I0814 13:20:39.453585  273464 served_api_inventory.go:107] optional API served: gateway.networking.k8s.io/v1/tlsroutes
+  I0814 13:20:39.453588  273464 served_api_inventory.go:107] optional API served: k8s.ovn.org/v1/egressqoses
+  I0814 13:20:39.453596  273464 served_api_inventory.go:107] optional API served: metal3.io/v1alpha1/preprovisioningimages
+  I0814 13:20:39.453600  273464 served_api_inventory.go:107] optional API served: performance.openshift.io/v1alpha1/performanceprofiles
+  I0814 13:20:39.453603  273464 served_api_inventory.go:107] optional API served: gateway.networking.k8s.io/v1/gateways
+  I0814 13:20:39.453606  273464 served_api_inventory.go:107] optional API served: k8s.ovn.org/v1/egressips
+  I0814 13:20:39.453609  273464 served_api_inventory.go:107] optional API served: operators.coreos.com/v1alpha1/catalogsources
+  I0814 13:20:39.453612  273464 served_api_inventory.go:107] optional API served: tuned.openshift.io/v1/tuneds
+  I0814 13:20:39.453614  273464 served_api_inventory.go:107] optional API served: snapshot.storage.k8s.io/v1/volumesnapshotclasses
+  I0814 13:20:39.453617  273464 served_api_inventory.go:107] optional API served: metal3.io/v1alpha1/hostfirmwarecomponents
+  I0814 13:20:39.453620  273464 served_api_inventory.go:107] optional API served: operators.coreos.com/v2/operatorconditions
+  I0814 13:20:39.453628  273464 served_api_inventory.go:107] optional API served: migration.k8s.io/v1alpha1/storageversionmigrations
+  I0814 13:20:39.453631  273464 served_api_inventory.go:107] optional API served: monitoring.coreos.com/v1/alertmanagers
+  I0814 13:20:39.453634  273464 served_api_inventory.go:107] optional API served: infrastructure.cluster.x-k8s.io/v1beta1/metal3remediations
+  I0814 13:20:39.453637  273464 served_api_inventory.go:107] optional API served: packages.operators.coreos.com/v1/packagemanifests
+  I0814 13:20:39.453646  273464 served_api_inventory.go:107] optional API served: snapshot.storage.k8s.io/v1/volumesnapshotcontents
+  I0814 13:20:39.453650  273464 served_api_inventory.go:107] optional API served: metal3.io/v1alpha1/hostfirmwaresettings
+  I0814 13:20:39.453652  273464 served_api_inventory.go:107] optional API served: gateway.networking.k8s.io/v1beta1/referencegrants
+  I0814 13:20:39.453655  273464 served_api_inventory.go:107] optional API served: monitoring.coreos.com/v1/servicemonitors
+  I0814 13:20:39.453658  273464 served_api_inventory.go:107] optional API served: gateway.networking.k8s.io/v1beta1/httproutes
+  I0814 13:20:39.453662  273464 served_api_inventory.go:107] optional API served: machine.openshift.io/v1beta1/machinesets
+  I0814 13:20:39.453665  273464 served_api_inventory.go:107] optional API served: olm.operatorframework.io/v1/clustercatalogs
+  I0814 13:20:39.453668  273464 served_api_inventory.go:107] optional API served: whereabouts.cni.cncf.io/v1alpha1/nodeslicepools
+  I0814 13:20:39.453676  273464 served_api_inventory.go:107] optional API served: metal3.io/v1alpha1/firmwareschemas
+  I0814 13:20:39.453678  273464 served_api_inventory.go:107] optional API served: metal3.io/v1alpha1/hostupdatepolicies
+  I0814 13:20:39.453681  273464 served_api_inventory.go:107] optional API served: monitoring.coreos.com/v1beta1/alertmanagerconfigs
+  I0814 13:20:39.453684  273464 served_api_inventory.go:107] optional API served: k8s.cni.cncf.io/v1/network-attachment-definitions
+  I0814 13:20:39.453687  273464 served_api_inventory.go:107] optional API served: gateway.networking.k8s.io/v1/grpcroutes
+  I0814 13:20:39.453690  273464 served_api_inventory.go:107] optional API served: k8s.cni.cncf.io/v1alpha1/ipamclaims
+  I0814 13:20:39.453693  273464 served_api_inventory.go:107] optional API served: gateway.networking.k8s.io/v1beta1/gatewayclasses
+  I0814 13:20:39.453701  273464 served_api_inventory.go:107] optional API served: infrastructure.cluster.x-k8s.io/v1beta1/metal3remediationtemplates
+  I0814 13:20:39.453705  273464 served_api_inventory.go:107] optional API served: operators.coreos.com/v1alpha1/clusterserviceversions
+  I0814 13:20:39.453708  273464 served_api_inventory.go:107] optional API served: helm.openshift.io/v1beta1/helmchartrepositories
+  I0814 13:20:39.453711  273464 served_api_inventory.go:107] optional API served: gateway.networking.k8s.io/v1beta1/gateways
+  I0814 13:20:39.453714  273464 served_api_inventory.go:107] optional API served: metal3.io/v1alpha1/baremetalhosts
+  I0814 13:20:39.453716  273464 served_api_inventory.go:107] optional API served: ipam.cluster.x-k8s.io/v1beta1/ipaddressclaims
+  I0814 13:20:39.453719  273464 served_api_inventory.go:107] optional API served: operators.coreos.com/v1alpha1/subscriptions
+  I0814 13:20:39.453723  273464 served_api_inventory.go:107] optional API served: gateway.networking.k8s.io/v1/backendtlspolicies
+  I0814 13:20:39.453726  273464 served_api_inventory.go:107] optional API served: operators.coreos.com/v1/operatorconditions
+  I0814 13:20:39.453729  273464 served_api_inventory.go:107] optional API served: helm.openshift.io/v1beta1/projecthelmchartrepositories
+  I0814 13:20:39.453732  273464 served_api_inventory.go:107] optional API served: metal3.io/v1alpha1/provisionings
+  I0814 13:20:39.453735  273464 served_api_inventory.go:107] optional API served: gateway.networking.k8s.io/v1/listenersets
+  I0814 13:20:39.453738  273464 served_api_inventory.go:107] optional API served: operators.coreos.com/v1/operators
+  I0814 13:20:39.453741  273464 served_api_inventory.go:107] optional API served: k8s.ovn.org/v1/userdefinednetworks
+  I0814 13:20:39.453744  273464 served_api_inventory.go:107] optional API served: populator.storage.k8s.io/v1beta1/volumepopulators
+  I0814 13:20:39.453748  273464 served_api_inventory.go:107] optional API served: k8s.ovn.org/v1/egressservices
+  I0814 13:20:39.453752  273464 served_api_inventory.go:107] optional API served: gateway.networking.k8s.io/v1/referencegrants
+  I0814 13:20:39.453755  273464 served_api_inventory.go:107] optional API served: operator.openshift.io/v1alpha1/imagecontentsourcepolicies
+  I0814 13:20:39.453773  273464 served_api_inventory.go:107] optional API served: ipam.cluster.x-k8s.io/v1alpha1/ipaddresses
+  I0814 13:20:39.453776  273464 served_api_inventory.go:107] optional API served: migration.k8s.io/v1alpha1/storagestates
+  I0814 13:20:39.453780  273464 served_api_inventory.go:107] optional API served: autoscaling.openshift.io/v1/clusterautoscalers
+  I0814 13:20:39.453784  273464 served_api_inventory.go:107] optional API served: performance.openshift.io/v1/performanceprofiles
+  I0814 13:20:39.453787  273464 served_api_inventory.go:107] optional API served: operators.coreos.com/v1/olmconfigs
+  I0814 13:20:39.453790  273464 served_api_inventory.go:107] optional API served: monitoring.coreos.com/v1/probes
+  I0814 13:20:39.453793  273464 served_api_inventory.go:107] optional API served: k8s.ovn.org/v1/adminpolicybasedexternalroutes
+  I0814 13:20:39.453795  273464 served_api_inventory.go:107] optional API served: metal3.io/v1alpha1/hardwaredata
+  I0814 13:20:39.453798  273464 served_api_inventory.go:107] optional API served: operators.coreos.com/v1alpha1/installplans
+  I0814 13:20:39.453801  273464 served_api_inventory.go:107] optional API served: operators.coreos.com/v1alpha2/operatorgroups
+  I0814 13:20:39.453804  273464 served_api_inventory.go:107] optional API served: operators.coreos.com/v1/operatorgroups
+  I0814 13:20:39.453807  273464 served_api_inventory.go:107] optional API served: metrics.k8s.io/v1beta1/nodes
+  I0814 13:20:39.453811  273464 served_api_inventory.go:107] optional API served: metrics.k8s.io/v1beta1/pods
+  I0814 13:20:39.453814  273464 served_api_inventory.go:107] optional API served: ipam.cluster.x-k8s.io/v1alpha1/ipaddressclaims
+  I0814 13:20:39.453817  273464 served_api_inventory.go:107] optional API served: monitoring.coreos.com/v1/thanosrulers
+  I0814 13:20:39.453820  273464 served_api_inventory.go:107] optional API served: machine.openshift.io/v1beta1/machinehealthchecks
+  I0814 13:20:39.453823  273464 served_api_inventory.go:107] optional API served: gateway.networking.k8s.io/v1/httproutes
+  I0814 13:20:39.453826  273464 served_api_inventory.go:107] optional API served: k8s.ovn.org/v1/clusteruserdefinednetworks
+  I0814 13:20:39.453828  273464 served_api_inventory.go:107] optional API served: performance.openshift.io/v2/performanceprofiles
+  I0814 13:20:39.453832  273464 served_api_inventory.go:107] optional API served: policy.networking.k8s.io/v1alpha1/baselineadminnetworkpolicies
+  I0814 13:20:39.453835  273464 served_api_inventory.go:107] optional API served: autoscaling.openshift.io/v1beta1/machineautoscalers
+  I0814 13:20:39.453838  273464 served_api_inventory.go:107] optional API served: tuned.openshift.io/v1/profiles
+  I0814 13:20:39.453841  273464 served_api_inventory.go:107] optional API served: monitoring.coreos.com/v1/podmonitors
+  I0814 13:20:39.453857  273464 served_api_inventory.go:110] optional API absent (OK): etcd.openshift.io/v1/pacemakerclusters
+  I0814 13:20:39.453862  273464 served_api_inventory.go:110] optional API absent (OK): sharedresource.openshift.io/v1alpha1/sharedconfigmaps
+  I0814 13:20:39.453872  273464 served_api_inventory.go:110] optional API absent (OK): network.openshift.io/v1/clusternetworks
+  I0814 13:20:39.453876  273464 served_api_inventory.go:110] optional API absent (OK): network.openshift.io/v1/egressnetworkpolicies
+  I0814 13:20:39.453880  273464 served_api_inventory.go:110] optional API absent (OK): network.openshift.io/v1/hostsubnets
+  I0814 13:20:39.453884  273464 served_api_inventory.go:110] optional API absent (OK): monitoring.coreos.com/v1alpha1/prometheusagents
+  I0814 13:20:39.453887  273464 served_api_inventory.go:110] optional API absent (OK): network.openshift.io/v1/netnamespaces
+  I0814 13:20:39.453890  273464 served_api_inventory.go:110] optional API absent (OK): etcd.openshift.io/v1alpha1/pacemakerclusters
+  I0814 13:20:39.453892  273464 served_api_inventory.go:110] optional API absent (OK): sharedresource.openshift.io/v1alpha1/sharedsecrets
+  I0814 13:20:39.453896  273464 served_api_inventory.go:110] optional API absent (OK): monitoring.coreos.com/v1alpha1/scrapeconfigs
+  I0814 13:20:39.453898  273464 served_api_inventory.go:110] optional API absent (OK): metal3.io/v1alpha1/hostbmcsecrets
+  • [0.856 seconds]
