@@ -98,6 +98,11 @@ func optionalAPIEntries() []servedapis.ServedAPIEntry {
 		{Group: "monitoring.coreos.com", Version: "v1", Resource: "servicemonitors", Kind: "ServiceMonitor", Scope: servedapis.ScopeNamespaced, Source: servedapis.SourceOpenShiftCRD},
 		{Group: "monitoring.coreos.com", Version: "v1", Resource: "thanosrulers", Kind: "ThanosRuler", Scope: servedapis.ScopeNamespaced, Source: servedapis.SourceOpenShiftCRD},
 
+		// operator.openshift.io/v1alpha1 — deprecated APIs still served for backward compatibility.
+		// The operator/v1alpha1 directory is excluded from the CRD walk (it contains alpha versions
+		// superseded by operator/v1), but some resources in it are still actively served.
+		{Group: "operator.openshift.io", Version: "v1alpha1", Resource: "imagecontentsourcepolicies", Kind: "ImageContentSourcePolicy", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOpenShiftCRD},
+
 		// olm.operatorframework.io — OLM v1
 		{Group: "olm.operatorframework.io", Version: "v1", Resource: "clustercatalogs", Kind: "ClusterCatalog", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOpenShiftCRD},
 		{Group: "olm.operatorframework.io", Version: "v1", Resource: "clusterextensions", Kind: "ClusterExtension", Scope: servedapis.ScopeCluster, Source: servedapis.SourceOpenShiftCRD},
