@@ -136,6 +136,35 @@ type crdFileEntry struct {
 	profiles []servedapis.ClusterProfile
 }
 
+// crdDirSkipPrefixes lists repository-relative path prefixes (using the OS path separator)
+// of zz_generated.crd-manifests parent directories to skip during the walk.
+// These directories either contain non-deployed CRDs, platform-specific CRDs, or
+// alpha versions that have been superseded by stable versions in sibling packages.
+var crdDirSkipPrefixes = func() []string {
+	join := filepath.Join
+	return []string{
+		// config/v1alpha1 and v1alpha2: alpha versions superseded by config/v1
+		join("config", "v1alpha1"),
+		join("config", "v1alpha2"),
+		// etcd: pacemaker-based HA etcd, not on standard clusters
+		"etcd",
+		// example: documentation/example CRDs, never deployed in production
+		"example",
+		// insights/v1alpha1 and v1alpha2: superseded by insights/v1
+		join("insights", "v1alpha1"),
+		join("insights", "v1alpha2"),
+		// machineconfiguration/v1alpha1: alpha resources not yet deployed on Default clusters
+		join("machineconfiguration", "v1alpha1"),
+		// network: OpenShift SDN virtual resources (clusternetworks, hostsubnets, etc.),
+		// served by the aggregated network API server, not present on OVN-K clusters
+		"network",
+		// operator/v1alpha1: alpha versions superseded by operator/v1
+		join("operator", "v1alpha1"),
+		// sharedresource: TechPreview SharedResource CSI Driver (missing feature-gate annotation)
+		"sharedresource",
+	}
+}()
+
 // loadCRDEntries walks SourceDir for all zz_generated.crd-manifests/ directories and returns
 // entries for every CRD file that belongs to the Default feature set.
 func (o *WriteServedAPIInventory) loadCRDEntries() ([]crdFileEntry, error) {
@@ -146,30 +175,39 @@ func (o *WriteServedAPIInventory) loadCRDEntries() ([]crdFileEntry, error) {
 		if err != nil {
 			return err
 		}
-		// Only descend into zz_generated.crd-manifests directories.
-		if d.IsDir() {
-			if d.Name() == "zz_generated.crd-manifests" {
-				return nil // descend into it
+		if !d.IsDir() {
+			if !strings.HasSuffix(d.Name(), ".yaml") {
+				return nil
 			}
-			// Skip vendor, tests, and the directory itself.
-			if d.Name() == "vendor" || d.Name() == "tests" {
+			// Only process files directly inside a zz_generated.crd-manifests/ directory.
+			if filepath.Base(filepath.Dir(path)) != "zz_generated.crd-manifests" {
+				return nil
+			}
+			entries, err := parseCRDFile(path, defaultGates)
+			if err != nil {
+				return fmt.Errorf("parsing %q: %w", path, err)
+			}
+			result = append(result, entries...)
+			return nil
+		}
+
+		// Skip well-known non-CRD directories.
+		switch d.Name() {
+		case "vendor", "tests", ".git":
+			return filepath.SkipDir
+		}
+
+		// Skip package directories on the skip list.
+		rel, err := filepath.Rel(o.SourceDir, path)
+		if err != nil {
+			return err
+		}
+		for _, prefix := range crdDirSkipPrefixes {
+			if rel == prefix || strings.HasPrefix(rel, prefix+string(filepath.Separator)) {
 				return filepath.SkipDir
 			}
-			// Descend into anything else at the top level.
-			return nil
 		}
-		if !strings.HasSuffix(d.Name(), ".yaml") {
-			return nil
-		}
-		// Only process files directly inside a zz_generated.crd-manifests/ directory.
-		if filepath.Base(filepath.Dir(path)) != "zz_generated.crd-manifests" {
-			return nil
-		}
-		entries, err := parseCRDFile(path, defaultGates)
-		if err != nil {
-			return fmt.Errorf("parsing %q: %w", path, err)
-		}
-		result = append(result, entries...)
+
 		return nil
 	})
 	return result, err
